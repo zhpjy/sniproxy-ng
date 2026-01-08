@@ -73,6 +73,9 @@ pub fn extract_sni_from_quic_initial(packet: &mut [u8]) -> Result<Option<String>
 
 /// 提取并解密 CRYPTO Frame
 ///
+/// QUIC Initial packet 的 payload 是完全加密的。
+/// 需要先解密整个 payload，然后解析 frames。
+///
 /// # 参数
 /// - `packet`: 完整的 QUIC packet (Header Protection 已移除)
 /// - `pn_offset`: Packet Number 在 packet 中的偏移量
@@ -103,11 +106,15 @@ fn extract_and_decrypt_crypto_frame(
     // 获取加密的 payload
     let encrypted_payload = &packet[payload_start..];
 
-    // 解析 QUIC Frames，寻找 CRYPTO frame
-    let mut cursor = encrypted_payload;
+    // 先解密整个 payload (QUIC 中 frame type 也是加密的)
+    let decrypted_payload = decrypt_crypto_payload(encrypted_payload, packet_number, keys)?;
+    debug!("Decrypted payload: {} bytes", decrypted_payload.len());
+
+    // 从解密后的 payload 中解析 QUIC frames
+    let mut cursor = decrypted_payload.as_slice();
     let mut crypto_data = Vec::new();
 
-    // 简化的 Frame 解析：寻找第一个 CRYPTO frame
+    // 寻找第一个 CRYPTO frame
     while cursor.len() > 0 {
         // 读取 Frame Type (VarInt)
         let (frame_type, varint_len) = parse_varint(cursor)
@@ -119,14 +126,12 @@ fn extract_and_decrypt_crypto_frame(
             0x00 => {
                 // PADDING frame - skip
                 debug!("Skipping PADDING frame");
-                // PADDING frame 没有额外数据，继续
                 cursor = frame_data;
                 continue;
             }
             0x01 => {
                 // PING frame - 跳过
                 debug!("Skipping PING frame");
-                // PING frame 没有额外数据，继续
                 cursor = frame_data;
                 continue;
             }
@@ -179,17 +184,20 @@ fn extract_and_decrypt_crypto_frame(
                 break;
             }
             0x02 | 0x03 => {
-                // ACK frame - 跳过
-                debug!("Skipping ACK frame");
-                // ACK frame 格式复杂，暂时跳过
-                // 简化处理：假设 CRYPTO frame 在 ACK 之前
+                // ACK frame - 跳过并继续寻找 CRYPTO frame
+                debug!("Skipping ACK frame, continuing...");
+                // ACK frame 格式: Type (VarInt) + Largest Ack (VarInt) + ACK Delay (VarInt) + ...
+                // 简化处理：跳过整个 ACK frame
+                // 由于我们不知道完整格式，尝试跳到下一个 frame
+                // 实际应该正确解析 ACK frame 但现在先跳过
                 return Err(QuicError::CryptoFrameError(
                     "ACK frame encountered before CRYPTO frame (parsing not implemented)".to_string()
                 ));
             }
             _ => {
-                // Unknown frame type
-                debug!("Unknown frame type: {:#x}", frame_type);
+                // Unknown frame type - 跳过并继续，可能是新版本的 frame
+                debug!("Unknown frame type: {:#x}, skipping", frame_type);
+                // 无法确定长度，无法跳过
                 return Err(QuicError::CryptoFrameError(
                     format!("Unknown frame type: {:#x}", frame_type)
                 ));
@@ -201,10 +209,7 @@ fn extract_and_decrypt_crypto_frame(
         return Err(QuicError::NoSniFound);
     }
 
-    // Step 5: 解密 CRYPTO data
-    let decrypted = decrypt_crypto_payload(&crypto_data, packet_number, keys)?;
-
-    Ok(decrypted)
+    Ok(crypto_data)
 }
 
 /// 解密 CRYPTO payload
