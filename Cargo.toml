@@ -34,6 +34,12 @@ bytes = "1.7"
 thiserror = "1.0"
 anyhow = "1.0"
 
+# QUIC SNI 提取 - 新增依赖
+ring = "0.16"              # Google 高性能密码学库
+hkdf = "0.12"              # HMAC-based Key Derivation (RFC 5869)
+aes-gcm = "0.10"           # AEAD 加密 (RFC 5116)
+sha2 = "0.10"              # SHA-2 实现
+
 # 网络工具
 socket2 = "0.5"
 
