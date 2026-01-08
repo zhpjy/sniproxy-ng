@@ -3,6 +3,7 @@ mod tls;
 mod tcp;
 mod quic;
 mod socks5;
+mod router;
 
 use anyhow::Result;
 use tracing::{info, error};
@@ -23,6 +24,7 @@ async fn main() -> Result<()> {
 
     info!("Server listening on {}", config.server.listen_addr);
     info!("SOCKS5 backend: {}", config.socks5.addr);
+    info!("Routing rules: {} domain patterns", config.rules.domain.len());
 
     // 启动 TCP 监听器 (HTTP/1.1 + TLS)
     let tcp_handle = tokio::spawn(tcp::run(config.clone()));
