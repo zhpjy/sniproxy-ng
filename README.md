@@ -1,152 +1,80 @@
 # sniproxy-ng
 
-下一代 SNI 代理服务器,支持 HTTP/1.1 和 HTTP/2,通过 SOCKS5 代理转发流量。
+基于 TLS SNI 的透明代理服务器，通过 SOCKS5 转发流量。
 
-> **注意**: QUIC/HTTP3 支持受限,详见下方说明。
+## 特性
 
-## 功能特性
+- **TLS SNI 提取** - 从 ClientHello 中提取目标域名
+- **SOCKS5 转发** - 支持 TCP CONNECT 和 UDP ASSOCIATE
+- **QUIC/HTTP3 支持** - 解密 Initial Packet 提取 SNI
+- **域名白名单** - 灵活的通配符匹配规则
+- **连接池** - TCP 和 QUIC 会话复用
 
-- ✅ **TLS SNI 提取** - 从 TLS ClientHello 中提取 Server Name Indication
-- ✅ **SOCKS5 代理** - 通过 SOCKS5 代理转发流量
-  - 支持 TCP CONNECT
-  - 支持 UDP ASSOCIATE
-  - 支持用户名/密码认证
-- ✅ **TCP 代理** - 完整的 HTTP/1.1 和 HTTPS 代理功能
-- ⚠️ **QUIC/HTTP3 支持** - 受限 (详见下方)
-- ✅ **结构化日志** - 使用 tracing 框架
-- ✅ **配置管理** - TOML 格式配置文件
-- ✅ **高性能** - 基于 Tokio 异步运行时
-
-## QUIC/HTTP3 限制说明
-
-由于 QUIC 协议使用 TLS 1.3 加密整个握手过程,**SNI (Server Name Indication) 不再以明文传输**。这意味着:
-
-- ❌ **无法直接提取 QUIC 的 SNI** (RFC 9001 规定 TLS 1.3 ClientHello 完全加密)
-- ✅ **TCP/HTTP/1.1 和 HTTP/2 的 SNI 提取完全正常**
-- 📝 详见 [QUIC 实现说明文档](docs/QUIC_IMPLEMENTATION_NOTES.md)
-
-**替代方案**:
-1. 使用 TCP 代理 (适用于 HTTP/1.1, HTTP/2)
-2. 配置文件预定义路由规则
-3. QUIC 终端代理 (需要 SSL 证书,未来版本)
-
-## 使用场景
-
-将特定域名(如 Google 服务)的流量透明地通过 SOCKS5 代理转发:
-
-1. 在 `/etc/hosts` 中将目标域名指向 sniproxy-ng 服务器
-2. sniproxy-ng 提取 TLS SNI 并确定目标主机
-3. 通过 SOCKS5 代理转发加密流量
-4. 对客户端完全透明
-
-## 配置示例
+## 配置
 
 ```toml
 [server]
-listen_addr = "0.0.0.0:443"
+listen_addr = "0.0.0.0:443"  # 标准 HTTPS 端口
 log_level = "info"
-log_format = "pretty"
 
 [socks5]
 addr = "127.0.0.1:1080"
 timeout = 30
 max_connections = 100
-# 可选认证
-# username = "user"
-# password = "pass"
 
 [rules]
-default_backend = "127.0.0.1:1080"
-
-[[rules.domain]]
-pattern = "*.google.com"
-backend = "127.0.0.1:1080"
-
-[[rules.domain]]
-pattern = "*.youtube.com"
-backend = "127.0.0.1:1080"
+allow = ["*.google.com", "*youtube.com"]  # 空数组允许所有域名
 ```
 
-## 构建
+## 使用
 
 ```bash
-# 使用 cargo 构建
+# 构建
 cargo build --release
 
-# 或使用 nix (开发环境)
-nix build
+# 运行（监听 443 端口需要 root 权限）
+sudo ./target/release/sniproxy-ng
 ```
 
-## 运行
+## 测试
+
+**无需 root 权限的测试方法**：
+
+临时修改配置文件，使用非特权端口（如 8443）：
+
+```toml
+[server]
+listen_addr = "0.0.0.0:8443"  # 临时测试端口
+```
 
 ```bash
-# 1. 创建配置文件 (见上方示例)
+# 测试 QUIC/HTTP3
+curl --http3 https://www.google.com --connect-to www.google.com:443:127.0.0.1:8443
 
-# 2. 启动服务器
-./target/release/sniproxy-ng
-
-# 或使用 nix run
-nix run
+# 测试 HTTP/2
+curl -v --proxy socks5://127.0.0.1:1080 https://www.google.com
 ```
 
-## 开发
+`--connect-to` 参数将流量重定向到本地测试端口，无需修改 `/etc/hosts`。
 
-### 依赖
-
-- Rust 1.70+
-- Nix (可选,用于开发环境)
-
-### 运行测试
-
-```bash
-cargo test
-```
-
-### 代码结构
+## 工作原理
 
 ```
-src/
-├── main.rs          # 程序入口
-├── config.rs        # 配置管理
-├── tcp/             # TCP 代理实现
-│   └── mod.rs       # TCP 监听器和转发逻辑
-├── quic/            # QUIC/HTTP3 支持 (开发中)
-├── tls/             # TLS SNI 提取
-│   └── sni.rs       # SNI 解析实现
-└── socks5/          # SOCKS5 客户端
-    ├── client.rs    # TCP CONNECT
-    └── udp.rs       # UDP ASSOCIATE
+客户端 → sniproxy-ng:443 → 提取 SNI → SOCKS5 代理 → 目标服务器
 ```
 
-## 测试状态
-
-- ✅ 10/10 单元测试通过
-- ✅ TLS SNI 提取测试 (4 tests)
-- ✅ SOCKS5 客户端测试 (4 tests)
-- ✅ 配置解析测试 (2 tests)
-
-## TODO
-
-- [ ] 完整的 QUIC/HTTP3 支持
-- [ ] 连接池和连接复用
-- [ ] 路由规则引擎
-- [ ] 性能测试和优化
-- [ ] Docker 镜像
-- [ ] 更多文档
+1. 客户端连接到 sniproxy-ng 监听的 443 端口
+2. sniproxy-ng 提取 TLS ClientHello 中的 SNI
+3. 根据白名单规则验证域名
+4. 通过 SOCKS5 代理转发流量
 
 ## 技术栈
 
-- **运行时**: Tokio (异步 Rust)
-- **TLS**: rustls
-- **QUIC**: Quinn
-- **SOCKS5**: fast-socks5
-- **日志**: tracing + tracing-subscriber
-- **配置**: serde + toml
+- Tokio (异步运行时)
+- rustls (TLS)
+- ring (QUIC 加密)
+- fast-socks5 (SOCKS5 客户端)
 
-## 许可证
+## License
 
-[待定]
-
-## 贡献
-
-欢迎提交 Issue 和 Pull Request!
+MIT
