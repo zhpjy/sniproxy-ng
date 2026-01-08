@@ -1,8 +1,10 @@
 use crate::config::Config;
-use crate::socks5::Socks5Client;
+use crate::socks5::{Socks5Client, ConnectionPool, PoolConfig, PooledConnectionGuard};
+use crate::socks5::Socks5TcpStream;
 use crate::tls::sni::extract_sni;
 use crate::router::Router;
 use anyhow::{Result, anyhow, bail};
+use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tracing::{info, debug, error, warn};
@@ -15,18 +17,15 @@ pub async fn run(config: Config) -> Result<()> {
     info!("TCP proxy server listening on {}", config.server.listen_addr);
 
     // 创建路由器
-    let router = Router::new(config.clone());
+    let router = Arc::new(Router::new(config.clone()));
 
-    // 创建 SOCKS5 客户端
-    let socks5_client = if config.socks5.username.is_some() && config.socks5.password.is_some() {
-        Socks5Client::new(config.socks5.addr.to_string())
-            .with_auth(
-                config.socks5.username.clone().unwrap(),
-                config.socks5.password.clone().unwrap()
-            )
-    } else {
-        Socks5Client::new(config.socks5.addr.to_string())
+    // 创建连接池
+    let pool_config = PoolConfig {
+        max_connections: config.socks5.max_connections,
+        ..Default::default()
     };
+    let pool = Arc::new(ConnectionPool::new(pool_config));
+    info!("SOCKS5 connection pool created");
 
     loop {
         match listener.accept().await {
@@ -34,10 +33,21 @@ pub async fn run(config: Config) -> Result<()> {
                 info!("Accepted connection from {}", client_addr);
 
                 // 克隆以供任务使用
-                let socks5_client_clone = socks5_client.clone();
                 let router_clone = router.clone();
+                let pool_clone = pool.clone();
+                let socks5_addr = config.socks5.addr.to_string();
+                let socks5_username = config.socks5.username.clone();
+                let socks5_password = config.socks5.password.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = handle_client(client_stream, client_addr, socks5_client_clone, router_clone).await {
+                    if let Err(e) = handle_client(
+                        client_stream,
+                        client_addr,
+                        router_clone,
+                        pool_clone,
+                        socks5_addr,
+                        socks5_username,
+                        socks5_password,
+                    ).await {
                         error!("Error handling client {}: {}", client_addr, e);
                     }
                 });
@@ -53,8 +63,11 @@ pub async fn run(config: Config) -> Result<()> {
 async fn handle_client(
     client_stream: TcpStream,
     client_addr: std::net::SocketAddr,
-    socks5_client: Socks5Client,
-    router: Router,
+    router: Arc<Router>,
+    pool: Arc<ConnectionPool>,
+    socks5_addr: String,
+    socks5_username: Option<String>,
+    socks5_password: Option<String>,
 ) -> Result<()> {
     debug!("Handling client {}", client_addr);
 
@@ -101,13 +114,37 @@ async fn handle_client(
 
     // 4. 从 SNI 提取目标主机和端口
     // 默认使用 443 端口 (HTTPS)
-    let target_host = sni;
+    let target_host = sni.clone();
     let target_port = 443;
 
-    // 5. 通过 SOCKS5 代理连接到目标服务器
-    debug!("Connecting to {}:{} via SOCKS5 proxy", target_host, target_port);
-    let proxy_stream = socks5_client.connect(&target_host, target_port).await
-        .map_err(|e| anyhow!("Failed to connect via SOCKS5: {}", e))?;
+    // 5. 通过连接池获取 SOCKS5 连接
+    debug!("Getting connection to {}:{} from pool", target_host, target_port);
+
+    // 克隆需要移动到闭包中的值
+    let socks5_addr = socks5_addr.clone();
+    let socks5_username = socks5_username.clone();
+    let socks5_password = socks5_password.clone();
+
+    let conn_guard = pool.get_connection(&target_host, target_port, move |host, port| {
+        // 将这些值移入 async block
+        let socks5_addr = socks5_addr.clone();
+        let socks5_username = socks5_username.clone();
+        let socks5_password = socks5_password.clone();
+        let host = host.to_string();
+        let port = port;
+
+        Box::pin(async move {
+            // 创建 SOCKS5 客户端并连接
+            let client = if let (Some(username), Some(password)) = (socks5_username, socks5_password) {
+                Socks5Client::new(socks5_addr)
+                    .with_auth(username, password)
+            } else {
+                Socks5Client::new(socks5_addr)
+            };
+
+            client.connect(&host, port).await
+        })
+    }).await?;
 
     info!("Established connection to {}:{} via SOCKS5", target_host, target_port);
 
@@ -117,7 +154,11 @@ async fn handle_client(
 
     // 7. 双向转发数据
     let (mut client_read, mut client_write) = client_stream.split();
-    let (mut proxy_read, mut proxy_write) = tokio::io::split(proxy_stream);
+
+    // 获取 SOCKS5 流的所有权以进行 split
+    // 注意：连接将不会被归还到池中，因为所有权已转移
+    let socks5_stream = conn_guard.into_inner();
+    let (mut proxy_read, mut proxy_write) = tokio::io::split(socks5_stream);
 
     // 创建双向转发任务
     let client_to_proxy = async {
@@ -137,14 +178,14 @@ async fn handle_client(
                 debug!("Client to proxy forwarding ended: {}", e);
             }
             // 关闭另一半
-            proxy_write.shutdown().await.ok();
+            let _ = proxy_write.shutdown().await;
         }
         result = proxy_to_client => {
             if let Err(e) = result {
                 debug!("Proxy to client forwarding ended: {}", e);
             }
             // 关闭另一半
-            client_write.shutdown().await.ok();
+            let _ = client_write.shutdown().await;
         }
     }
 

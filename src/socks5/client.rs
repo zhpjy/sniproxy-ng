@@ -19,6 +19,7 @@ impl Socks5Client {
     ///
     /// # 示例
     /// ```
+    /// # use sniproxy_ng::socks5::client::Socks5Client;
     /// let client = Socks5Client::new("127.0.0.1:1080");
     /// ```
     pub fn new<S: Into<String>>(proxy_addr: S) -> Self {

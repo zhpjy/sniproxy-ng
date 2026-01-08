@@ -236,6 +236,14 @@ impl PooledConnectionGuard {
     pub fn get_mut(&mut self) -> &mut Socks5TcpStream {
         &mut self.connection.as_mut().unwrap().stream
     }
+
+    /// 取出流的所有权，用于需要转移所有权的场景 (如 split)
+    ///
+    /// 注意：取出后连接不会被归还到池中
+    pub fn into_inner(mut self) -> Socks5TcpStream {
+        // 取出连接，阻止 Drop 中的归还逻辑
+        self.connection.take().unwrap().stream
+    }
 }
 
 impl Drop for PooledConnectionGuard {
