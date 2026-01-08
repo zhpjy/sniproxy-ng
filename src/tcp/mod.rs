@@ -152,12 +152,17 @@ async fn handle_client(
     // 因为 SOCKS5 连接已建立,我们开始转发数据
     client_stream.read_exact(&mut buffer[..n]).await?;
 
-    // 7. 双向转发数据
-    let (mut client_read, mut client_write) = client_stream.split();
-
     // 获取 SOCKS5 流的所有权以进行 split
     // 注意：连接将不会被归还到池中，因为所有权已转移
     let socks5_stream = conn_guard.into_inner();
+    let mut socks5_stream = socks5_stream;
+
+    // 先将 peek 的数据写入 SOCKS5 流
+    socks5_stream.write_all(&buffer[..n]).await?;
+    debug!("Wrote {} bytes of initial data to SOCKS5 stream", n);
+
+    // 7. 双向转发数据
+    let (mut client_read, mut client_write) = client_stream.split();
     let (mut proxy_read, mut proxy_write) = tokio::io::split(socks5_stream);
 
     // 创建双向转发任务
