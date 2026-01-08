@@ -6,6 +6,7 @@ use anyhow::{Result, Context};
 pub struct Config {
     pub server: ServerConfig,
     pub socks5: Socks5Config,
+    #[serde(default)]
     pub rules: RulesConfig,
 }
 
@@ -39,21 +40,11 @@ pub struct Socks5Config {
     pub password: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct RulesConfig {
-    /// 默认后端(当没有匹配规则时)
-    pub default_backend: SocketAddr,
-    /// 域名路由规则
+    /// 白名单域名模式数组，空数组表示允许所有域名
     #[serde(default)]
-    pub domain: Vec<DomainRule>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DomainRule {
-    /// 域名模式 (支持通配符, 如 "*.google.com")
-    pub pattern: String,
-    /// 后端 SOCKS5 代理地址
-    pub backend: SocketAddr,
+    pub allow: Vec<String>,
 }
 
 // 默认值函数
@@ -115,15 +106,26 @@ timeout = 30
 max_connections = 100
 
 [rules]
-default_backend = "127.0.0.1:1080"
-
-[[rules.domain]]
-pattern = "google.com"
-backend = "127.0.0.1:1080"
+allow = ["*.google.com", "api.*.com"]
 "#;
 
         let config: Config = toml::from_str(toml_str).unwrap();
         assert_eq!(config.server.listen_addr.port(), 443);
         assert_eq!(config.socks5.addr.port(), 1080);
+        assert_eq!(config.rules.allow.len(), 2);
+    }
+
+    #[test]
+    fn test_empty_rules_default() {
+        let toml_str = r#"
+[server]
+listen_addr = "0.0.0.0:443"
+
+[socks5]
+addr = "127.0.0.1:1080"
+"#;
+
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert!(config.rules.allow.is_empty());
     }
 }

@@ -1,6 +1,7 @@
 use crate::config::Config;
 use crate::socks5::Socks5Client;
 use crate::tls::sni::extract_sni;
+use crate::router::Router;
 use anyhow::{Result, anyhow, bail};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -12,6 +13,9 @@ pub async fn run(config: Config) -> Result<()> {
 
     let listener = TcpListener::bind(&config.server.listen_addr).await?;
     info!("TCP proxy server listening on {}", config.server.listen_addr);
+
+    // 创建路由器
+    let router = Router::new(config.clone());
 
     // 创建 SOCKS5 客户端
     let socks5_client = if config.socks5.username.is_some() && config.socks5.password.is_some() {
@@ -29,10 +33,11 @@ pub async fn run(config: Config) -> Result<()> {
             Ok((client_stream, client_addr)) => {
                 info!("Accepted connection from {}", client_addr);
 
-                // 克隆配置以供任务使用
+                // 克隆以供任务使用
                 let socks5_client_clone = socks5_client.clone();
+                let router_clone = router.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = handle_client(client_stream, client_addr, socks5_client_clone).await {
+                    if let Err(e) = handle_client(client_stream, client_addr, socks5_client_clone, router_clone).await {
                         error!("Error handling client {}: {}", client_addr, e);
                     }
                 });
@@ -49,6 +54,7 @@ async fn handle_client(
     client_stream: TcpStream,
     client_addr: std::net::SocketAddr,
     socks5_client: Socks5Client,
+    router: Router,
 ) -> Result<()> {
     debug!("Handling client {}", client_addr);
 
@@ -87,23 +93,29 @@ async fn handle_client(
         }
     };
 
-    // 3. 从 SNI 提取目标主机和端口
+    // 3. 白名单检查
+    if !router.is_allowed(&sni) {
+        warn!("Domain {} not in whitelist, rejecting connection from {}", sni, client_addr);
+        bail!("Domain '{}' is not in the whitelist", sni);
+    }
+
+    // 4. 从 SNI 提取目标主机和端口
     // 默认使用 443 端口 (HTTPS)
     let target_host = sni;
     let target_port = 443;
 
-    // 4. 通过 SOCKS5 代理连接到目标服务器
+    // 5. 通过 SOCKS5 代理连接到目标服务器
     debug!("Connecting to {}:{} via SOCKS5 proxy", target_host, target_port);
     let proxy_stream = socks5_client.connect(&target_host, target_port).await
         .map_err(|e| anyhow!("Failed to connect via SOCKS5: {}", e))?;
 
     info!("Established connection to {}:{} via SOCKS5", target_host, target_port);
 
-    // 5. 现在我们需要实际读取之前 peek 的数据
+    // 6. 现在我们需要实际读取之前 peek 的数据
     // 因为 SOCKS5 连接已建立,我们开始转发数据
     client_stream.read_exact(&mut buffer[..n]).await?;
 
-    // 6. 双向转发数据
+    // 7. 双向转发数据
     let (mut client_read, mut client_write) = client_stream.split();
     let (mut proxy_read, mut proxy_write) = tokio::io::split(proxy_stream);
 
@@ -157,7 +169,7 @@ addr = "127.0.0.1:1080"
 timeout = 30
 
 [rules]
-default_backend = "127.0.0.1:1080"
+allow = ["*.google.com", "api.*.com"]
 "#;
 
         let config: Config = toml::from_str(toml_str).unwrap();

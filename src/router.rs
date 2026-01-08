@@ -1,21 +1,12 @@
-/// 路由规则引擎
+/// 域名白名单规则引擎
 ///
-/// 根据 SNI 和配置规则匹配后端目标。
-use crate::config::{Config, DomainRule, Socks5Config};
-use anyhow::{Result, bail};
+/// 根据配置的白名单规则检查域名是否被允许。
+use crate::config::{Config, Socks5Config};
 use std::net::SocketAddr;
-use tracing::{info, debug, warn};
-
-/// 路由决策
-#[derive(Debug, Clone)]
-pub struct RouteDecision {
-    /// 目标后端地址
-    pub backend: SocketAddr,
-    /// 匹配的规则(如果有)
-    pub rule: Option<String>,
-}
+use tracing::{info, debug};
 
 /// 路由器
+#[derive(Clone)]
 pub struct Router {
     config: Config,
 }
@@ -26,49 +17,70 @@ impl Router {
         Self { config }
     }
 
-    /// 根据 SNI 查找路由
-    pub fn route(&self, sni: &str) -> Result<RouteDecision> {
-        debug!("Routing SNI: {}", sni);
+    /// 检查域名是否被允许
+    ///
+    /// 当 allow 数组为空时，允许所有域名。
+    /// 当 allow 数组有值时，只允许匹配任一模式的域名。
+    pub fn is_allowed(&self, hostname: &str) -> bool {
+        // 空 allow 数组 → 允许所有
+        if self.config.rules.allow.is_empty() {
+            debug!("No whitelist configured, allowing all domains");
+            return true;
+        }
 
-        // 1. 尝试匹配域名规则
-        for rule in &self.config.rules.domain {
-            if self.match_pattern(sni, &rule.pattern) {
-                info!("SNI '{}' matched rule pattern '{}'", sni, rule.pattern);
-                return Ok(RouteDecision {
-                    backend: rule.backend,
-                    rule: Some(rule.pattern.clone()),
-                });
+        // 检查是否匹配任一模式
+        for pattern in &self.config.rules.allow {
+            if self.match_pattern(hostname, pattern) {
+                info!("Domain '{}' matched whitelist pattern '{}'", hostname, pattern);
+                return true;
             }
         }
 
-        // 2. 使用默认后端
-        warn!("No rule matched for SNI '{}', using default backend", sni);
-        Ok(RouteDecision {
-            backend: self.config.rules.default_backend,
-            rule: None,
-        })
+        debug!("Domain '{}' did not match any whitelist pattern", hostname);
+        false
     }
 
-    /// 匹配通配符模式
+    /// 灵活通配符匹配
+    ///
+    /// 支持多个 `*` 的通配符模式，例如：
+    /// - `*google.com` 匹配 `google.com` 和 `www.google.com`
+    /// - `*.google.com` 只匹配 `www.google.com`，不匹配 `google.com`
+    /// - `api.*.com` 匹配 `api.example.com`
+    /// - `*.prod.*.internal` 匹配 `web.prod.db.internal`
     fn match_pattern(&self, hostname: &str, pattern: &str) -> bool {
-        // 简单的通配符匹配
+        // "*" 匹配所有
         if pattern == "*" {
             return true;
         }
 
-        if let Some(pattern_prefix) = pattern.strip_prefix('*') {
-            // *.example.com 匹配 foo.example.com
-            return hostname.ends_with(pattern_prefix);
+        // 按 * 分割模式
+        let parts: Vec<&str> = pattern.split('*').collect();
+        let mut pos = 0;
+
+        for (i, part) in parts.iter().enumerate() {
+            if part.is_empty() {
+                continue;
+            }
+
+            // 在 hostname 从 pos 位置开始查找 part
+            if let Some(idx) = hostname[pos..].find(part) {
+                pos += idx + part.len();
+
+                // 最后一个片段：检查是否匹配到末尾
+                if i == parts.len() - 1 {
+                    // 如果模式以 * 结尾，允许后面有内容
+                    if pattern.ends_with('*') {
+                        return true;
+                    }
+                    // 否则必须精确匹配到末尾
+                    return pos == hostname.len();
+                }
+            } else {
+                return false;
+            }
         }
 
-        if pattern.contains('*') {
-            // 更复杂的通配符(暂不支持)
-            warn!("Complex wildcard patterns not supported yet: {}", pattern);
-            return false;
-        }
-
-        // 精确匹配
-        hostname == pattern
+        true
     }
 
     /// 获取 SOCKS5 配置
@@ -86,7 +98,7 @@ impl Router {
 mod tests {
     use super::*;
 
-    fn create_test_config() -> Config {
+    fn create_test_config(allow_patterns: Vec<&str>) -> Config {
         Config {
             server: crate::config::ServerConfig {
                 listen_addr: "127.0.0.1:8443".parse().unwrap(),
@@ -101,67 +113,86 @@ mod tests {
                 password: None,
             },
             rules: crate::config::RulesConfig {
-                default_backend: "127.0.0.1:1080".parse().unwrap(),
-                domain: vec![
-                    DomainRule {
-                        pattern: "*.google.com".to_string(),
-                        backend: "192.168.1.10:1080".parse().unwrap(),
-                    },
-                    DomainRule {
-                        pattern: "www.example.com".to_string(),
-                        backend: "192.168.1.20:1080".parse().unwrap(),
-                    },
-                ],
+                allow: allow_patterns.into_iter().map(|s| s.to_string()).collect(),
             },
         }
     }
 
     #[test]
+    fn test_empty_rules_allow_all() {
+        let router = Router::new(create_test_config(vec![]));
+        assert!(router.is_allowed("google.com"));
+        assert!(router.is_allowed("any.domain.com"));
+        assert!(router.is_allowed("unknown.com"));
+    }
+
+    #[test]
+    fn test_wildcard_with_self() {
+        let router = Router::new(create_test_config(vec!["*google.com"]));
+        assert!(router.is_allowed("google.com"));      // 自身
+        assert!(router.is_allowed("www.google.com"));  // 子域名
+        assert!(router.is_allowed("mail.google.com"));
+        assert!(!router.is_allowed("evil.com"));
+    }
+
+    #[test]
+    fn test_wildcard_subdomain_only() {
+        let router = Router::new(create_test_config(vec!["*.google.com"]));
+        assert!(!router.is_allowed("google.com"));     // 不包括自身
+        assert!(router.is_allowed("www.google.com"));
+        assert!(router.is_allowed("mail.google.com"));
+        assert!(!router.is_allowed("evil.com"));
+    }
+
+    #[test]
+    fn test_multi_wildcard() {
+        let router = Router::new(create_test_config(vec!["*.prod.*.internal"]));
+        assert!(router.is_allowed("web.prod.db.internal"));
+        assert!(router.is_allowed("api.prod.cache.internal"));
+        assert!(router.is_allowed("app.prod.api.internal"));
+        assert!(router.is_allowed("dev.prod.db.internal"));   // 也匹配
+        assert!(!router.is_allowed("web.dev.db.internal"));   // 第二段不是 prod
+        assert!(!router.is_allowed("web.prod.db.com"));      // 不是 .internal 结尾
+    }
+
+    #[test]
+    fn test_api_wildcard() {
+        let router = Router::new(create_test_config(vec!["api.*.com"]));
+        assert!(router.is_allowed("api.example.com"));
+        assert!(router.is_allowed("api.foo.com"));
+        assert!(router.is_allowed("api.bar.com"));
+        assert!(!router.is_allowed("api.com"));         // 中间必须有内容
+        assert!(!router.is_allowed("www.api.com"));     // 前缀不匹配
+    }
+
+    #[test]
     fn test_exact_match() {
-        let router = Router::new(create_test_config());
-        let decision = router.route("www.example.com").unwrap();
-        
-        assert_eq!(decision.backend, "192.168.1.20:1080".parse::<SocketAddr>().unwrap());
-        assert_eq!(decision.rule, Some("www.example.com".to_string()));
+        let router = Router::new(create_test_config(vec!["www.example.com"]));
+        assert!(router.is_allowed("www.example.com"));
+        assert!(!router.is_allowed("example.com"));
+        assert!(!router.is_allowed("www.example.org"));
     }
 
     #[test]
-    fn test_wildcard_match() {
-        let router = Router::new(create_test_config());
-        let decision = router.route("www.google.com").unwrap();
-        
-        assert_eq!(decision.backend, "192.168.1.10:1080".parse::<SocketAddr>().unwrap());
-        assert_eq!(decision.rule, Some("*.google.com".to_string()));
+    fn test_multiple_patterns() {
+        let router = Router::new(create_test_config(vec![
+            "*.google.com",
+            "api.*.com",
+            "*.prod.*.internal"
+        ]));
+        assert!(router.is_allowed("www.google.com"));
+        assert!(router.is_allowed("mail.google.com"));
+        assert!(router.is_allowed("api.example.com"));
+        assert!(router.is_allowed("web.prod.db.internal"));
+        assert!(!router.is_allowed("evil.com"));
+        assert!(!router.is_allowed("www.api.com"));
     }
 
     #[test]
-    fn test_default_backend() {
-        let router = Router::new(create_test_config());
-        let decision = router.route("unknown.com").unwrap();
-        
-        assert_eq!(decision.backend, "127.0.0.1:1080".parse::<SocketAddr>().unwrap());
-        assert_eq!(decision.rule, None);
-    }
-
-    #[test]
-    fn test_wildcard_subdomain() {
-        let router = Router::new(create_test_config());
-        
-        // 测试多个子域名
-        let domains = vec![
-            "mail.google.com",
-            "drive.google.com",
-            "accounts.google.com",
-        ];
-
-        for domain in domains {
-            let decision = router.route(domain).unwrap();
-            assert_eq!(
-                decision.backend,
-                "192.168.1.10:1080".parse::<SocketAddr>().unwrap(),
-                "Failed for domain: {}",
-                domain
-            );
-        }
+    fn test_asterisk_only() {
+        let router = Router::new(create_test_config(vec!["*"]));
+        assert!(router.is_allowed("anything"));
+        assert!(router.is_allowed("any.domain.com"));
+        assert!(router.is_allowed("foo.bar.baz"));
     }
 }

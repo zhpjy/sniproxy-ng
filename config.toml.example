@@ -25,23 +25,17 @@ max_connections = 100
 # password = "pass"
 
 [rules]
-# 默认后端(当没有匹配规则时使用)
-default_backend = "127.0.0.1:1080"
+# 域名白名单 (可选)
+# 空 allow 数组或不配置 rules = 允许所有域名
+# 配置 allow 数组 = 只允许匹配的域名通过
 
-# 域名路由规则 (可选)
-# 如果不需要特殊路由,可以不配置任何规则,所有流量都会使用 default_backend
+# 允许所有域名 (默认行为)
+allow = []
 
-[[rules.domain]]
-# 精确匹配
-pattern = "google.com"
-backend = "127.0.0.1:1080"
-
-[[rules.domain]]
-# 通配符匹配
-pattern = "*.googlevideo.com"
-backend = "127.0.0.1:1080"
-
-[[rules.domain]]
-# 通配符匹配所有子域名
-pattern = "*.google.com"
-backend = "127.0.0.1:1080"
+# 或者只允许特定域名 (取消注释以启用)
+# allow = [
+#     "*google.com",           # google.com 及其所有子域名
+#     "*.googlevideo.com",     # googlevideo.com 的所有子域名
+#     "api.*.com",             # api.example.com, api.foo.com 等
+#     "*.prod.*.internal",     # *.prod.*.internal (多级通配符)
+# ]

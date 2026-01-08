@@ -24,7 +24,11 @@ async fn main() -> Result<()> {
 
     info!("Server listening on {}", config.server.listen_addr);
     info!("SOCKS5 backend: {}", config.socks5.addr);
-    info!("Routing rules: {} domain patterns", config.rules.domain.len());
+    if config.rules.allow.is_empty() {
+        info!("Whitelist: allowing all domains (no rules configured)");
+    } else {
+        info!("Whitelist: {} domain patterns", config.rules.allow.len());
+    }
 
     // 启动 TCP 监听器 (HTTP/1.1 + TLS)
     let tcp_handle = tokio::spawn(tcp::run(config.clone()));
