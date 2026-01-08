@@ -14,6 +14,7 @@ pub enum QuicError {
 
     /// DCID (Destination Connection ID) 无效
     #[error("Invalid DCID: {0}")]
+    #[allow(dead_code)]
     InvalidDcid(String),
 
     /// 密钥派生失败
@@ -54,6 +55,7 @@ pub enum QuicError {
 
     /// 其他错误
     #[error("Other error: {0}")]
+    #[allow(dead_code)]
     Other(String),
 }
 

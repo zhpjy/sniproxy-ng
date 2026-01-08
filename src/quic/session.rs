@@ -36,6 +36,7 @@ impl Default for QuicSessionConfig {
 }
 
 /// QUIC 会话 - 对应一个 DCID
+#[allow(dead_code)]
 pub struct QuicSession {
     /// DCID (Destination Connection ID)
     pub dcid: Vec<u8>,
@@ -261,6 +262,7 @@ impl QuicSessionManager {
     }
 
     /// 获取会话数量
+    #[allow(dead_code)]
     pub async fn session_count(&self) -> usize {
         let inner = self.inner.lock().await;
         inner.sessions.len()

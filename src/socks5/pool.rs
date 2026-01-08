@@ -18,6 +18,8 @@ pub struct PoolConfig {
     pub idle_timeout: Duration,
     /// 连接最大生命周期
     pub max_lifetime: Duration,
+    /// 清理间隔
+    pub cleanup_interval: Duration,
 }
 
 impl Default for PoolConfig {
@@ -26,6 +28,7 @@ impl Default for PoolConfig {
             max_connections: 100,
             idle_timeout: Duration::from_secs(60),
             max_lifetime: Duration::from_secs(300),
+            cleanup_interval: Duration::from_secs(30),
         }
     }
 }
@@ -165,6 +168,7 @@ impl ConnectionPool {
     }
 
     /// 获取统计信息
+    #[allow(dead_code)]
     pub async fn stats(&self) -> PoolStats {
         let idle = self.idle_connections.lock().await;
         let active = *self.active_count.lock().await;
@@ -181,6 +185,7 @@ impl ConnectionPool {
     }
 
     /// 清理过期连接
+    #[allow(dead_code)]
     pub async fn cleanup(&self) {
         let mut idle = self.idle_connections.lock().await;
         let now = Instant::now();
@@ -206,6 +211,19 @@ impl ConnectionPool {
             info!("Cleaned up {} expired connections", removed);
         }
     }
+
+    /// 启动连接池清理任务
+    ///
+    /// 定期清理过期的空闲连接，返回任务句柄
+    pub fn spawn_cleanup_task(self: Arc<Self>) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(self.config.cleanup_interval);
+            loop {
+                interval.tick().await;
+                self.cleanup().await;
+            }
+        })
+    }
 }
 
 impl Clone for ConnectionPool {
@@ -228,11 +246,13 @@ pub struct PooledConnectionGuard {
 
 impl PooledConnectionGuard {
     /// 获取底层的 SOCKS5 流引用
+    #[allow(dead_code)]
     pub fn get(&self) -> &Socks5TcpStream {
         &self.connection.as_ref().unwrap().stream
     }
 
     /// 获取底层的 SOCKS5 流可变引用
+    #[allow(dead_code)]
     pub fn get_mut(&mut self) -> &mut Socks5TcpStream {
         &mut self.connection.as_mut().unwrap().stream
     }
@@ -261,6 +281,7 @@ impl Drop for PooledConnectionGuard {
 
 /// 连接池统计信息
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct PoolStats {
     pub active_connections: usize,
     pub idle_connections: usize,

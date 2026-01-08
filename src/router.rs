@@ -84,11 +84,13 @@ impl Router {
     }
 
     /// 获取 SOCKS5 配置
+    #[allow(dead_code)]
     pub fn socks5_config(&self) -> &Socks5Config {
         &self.config.socks5
     }
 
     /// 获取服务器监听地址
+    #[allow(dead_code)]
     pub fn listen_addr(&self) -> SocketAddr {
         self.config.server.listen_addr
     }

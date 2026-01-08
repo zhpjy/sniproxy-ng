@@ -26,6 +26,10 @@ pub async fn run(config: Config) -> Result<()> {
     let pool = Arc::new(ConnectionPool::new(pool_config));
     info!("SOCKS5 connection pool created");
 
+    // 启动连接池清理任务
+    pool.clone().spawn_cleanup_task();
+    info!("TCP connection pool cleanup task started");
+
     loop {
         match listener.accept().await {
             Ok((client_stream, client_addr)) => {

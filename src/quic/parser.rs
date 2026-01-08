@@ -8,6 +8,7 @@ use tracing::{debug, trace};
 
 /// QUIC Initial Packet Header 结构
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct InitialHeader {
     /// 第一个字节 (包含 Packet Type 和 Packet Number Length)
     pub first_byte: u8,

@@ -71,6 +71,7 @@ impl Socks5UdpClient {
 }
 
 /// 导出 fast-socks5 的 UDP 类型
+#[allow(dead_code)]
 pub type Socks5UdpDatagram = Socks5Datagram<TcpStream>;
 
 #[cfg(test)]

@@ -3,6 +3,7 @@ use std::fmt;
 
 /// TLS SNI 提取错误类型
 #[derive(Debug)]
+#[allow(dead_code)]
 pub enum SniError {
     DataTooShort,
     NotHandshake,
