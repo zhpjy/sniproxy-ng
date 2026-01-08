@@ -108,9 +108,26 @@ fn extract_and_decrypt_crypto_frame(
 
     // 先解密整个 payload (QUIC 中 frame type 也是加密的)
     let decrypted_payload = decrypt_crypto_payload(encrypted_payload, packet_number, keys)?;
-    debug!("Decrypted payload: {} bytes", decrypted_payload.len());
+    debug!("Decrypted payload: {} bytes, first 10 bytes: {:02x?}", decrypted_payload.len(), &decrypted_payload[..decrypted_payload.len().min(10)]);
 
-    // 从解密后的 payload 中解析 QUIC frames
+    // 策略 1: 直接搜索 TLS ClientHello 的 magic bytes
+    // TLS Handshake record: ContentType=0x16, Version=0x03xx (0x0301, 0x0302, 0x0303, 0x0304)
+    for i in 0..decrypted_payload.len().saturating_sub(4) {
+        if decrypted_payload[i] == 0x16  // ContentType = Handshake
+            && decrypted_payload[i + 1] == 0x03  // Major version = 3
+            && decrypted_payload[i + 2] <= 0x04  // Minor version <= 4
+        {
+            // 找到 TLS 记录开头
+            let tls_data = &decrypted_payload[i..];
+            debug!("Found TLS Handshake record at offset {}", i);
+            return Ok(tls_data.to_vec());
+        }
+    }
+
+    // 策略 2: 如果没找到 TLS magic bytes，尝试解析 QUIC CRYPTO frame
+    // 这是为了兼容某些特殊格式的 packet
+    debug!("No TLS magic bytes found, trying QUIC frame parsing...");
+
     let mut cursor = decrypted_payload.as_slice();
     let mut crypto_data = Vec::new();
 
@@ -125,19 +142,17 @@ fn extract_and_decrypt_crypto_frame(
         match frame_type {
             0x00 => {
                 // PADDING frame - skip
-                debug!("Skipping PADDING frame");
                 cursor = frame_data;
                 continue;
             }
             0x01 => {
                 // PING frame - 跳过
-                debug!("Skipping PING frame");
                 cursor = frame_data;
                 continue;
             }
             0x06 => {
                 // CRYPTO Frame - 这是我们想要的！
-                debug!("Found CRYPTO frame");
+                debug!("Found CRYPTO frame via QUIC parsing");
 
                 // CRYPTO frame 格式:
                 // Type (VarInt) + Offset (VarInt) + Length (VarInt) + Data
@@ -183,33 +198,22 @@ fn extract_and_decrypt_crypto_frame(
                 // 找到我们需要的 CRYPTO data，跳出循环
                 break;
             }
-            0x02 | 0x03 => {
-                // ACK frame - 跳过并继续寻找 CRYPTO frame
-                debug!("Skipping ACK frame, continuing...");
-                // ACK frame 格式: Type (VarInt) + Largest Ack (VarInt) + ACK Delay (VarInt) + ...
-                // 简化处理：跳过整个 ACK frame
-                // 由于我们不知道完整格式，尝试跳到下一个 frame
-                // 实际应该正确解析 ACK frame 但现在先跳过
-                return Err(QuicError::CryptoFrameError(
-                    "ACK frame encountered before CRYPTO frame (parsing not implemented)".to_string()
-                ));
-            }
             _ => {
                 // Unknown frame type - 跳过并继续，可能是新版本的 frame
-                debug!("Unknown frame type: {:#x}, skipping", frame_type);
-                // 无法确定长度，无法跳过
-                return Err(QuicError::CryptoFrameError(
-                    format!("Unknown frame type: {:#x}", frame_type)
-                ));
+                debug!("Unknown frame type: {:#x}, trying next strategy", frame_type);
+                break;
             }
         }
     }
 
-    if crypto_data.is_empty() {
-        return Err(QuicError::NoSniFound);
+    if !crypto_data.is_empty() {
+        return Ok(crypto_data);
     }
 
-    Ok(crypto_data)
+    // 策略 3: 整个解密后的 payload 就是 TLS 数据
+    // 某些实现可能不使用 QUIC frame 包装
+    debug!("Trying entire decrypted payload as TLS data");
+    Ok(decrypted_payload.to_vec())
 }
 
 /// 解密 CRYPTO payload

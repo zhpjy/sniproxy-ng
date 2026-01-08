@@ -51,6 +51,7 @@ pub enum QuicError {
 
     /// 未找到 SNI
     #[error("No SNI found in packet")]
+    #[allow(dead_code)]
     NoSniFound,
 
     /// 其他错误
