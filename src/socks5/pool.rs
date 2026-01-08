@@ -306,6 +306,7 @@ mod tests {
             max_connections: 10,
             idle_timeout: Duration::from_secs(30),
             max_lifetime: Duration::from_secs(120),
+            cleanup_interval: Duration::from_secs(30),
         };
 
         let pool = ConnectionPool::new(config);

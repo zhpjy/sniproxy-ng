@@ -3,7 +3,7 @@
 /// 根据配置的白名单规则检查域名是否被允许。
 use crate::config::{Config, Socks5Config};
 use std::net::SocketAddr;
-use tracing::{info, debug};
+use tracing::{debug, info};
 
 /// 路由器
 #[derive(Clone)]
@@ -31,7 +31,10 @@ impl Router {
         // 检查是否匹配任一模式
         for pattern in &self.config.rules.allow {
             if self.match_pattern(hostname, pattern) {
-                info!("Domain '{}' matched whitelist pattern '{}'", hostname, pattern);
+                info!(
+                    "Domain '{}' matched whitelist pattern '{}'",
+                    hostname, pattern
+                );
                 return true;
             }
         }
@@ -89,10 +92,10 @@ impl Router {
         &self.config.socks5
     }
 
-    /// 获取服务器监听地址
+    /// 获取服务器 HTTPS 监听地址
     #[allow(dead_code)]
     pub fn listen_addr(&self) -> SocketAddr {
-        self.config.server.listen_addr
+        self.config.server.listen_https_addr.unwrap()
     }
 }
 
@@ -103,7 +106,8 @@ mod tests {
     fn create_test_config(allow_patterns: Vec<&str>) -> Config {
         Config {
             server: crate::config::ServerConfig {
-                listen_addr: "127.0.0.1:8443".parse().unwrap(),
+                listen_https_addr: Some("127.0.0.1:8443".parse().unwrap()),
+                listen_http_addr: None,
                 log_level: "debug".to_string(),
                 log_format: "pretty".to_string(),
             },
@@ -131,8 +135,8 @@ mod tests {
     #[test]
     fn test_wildcard_with_self() {
         let router = Router::new(create_test_config(vec!["*google.com"]));
-        assert!(router.is_allowed("google.com"));      // 自身
-        assert!(router.is_allowed("www.google.com"));  // 子域名
+        assert!(router.is_allowed("google.com")); // 自身
+        assert!(router.is_allowed("www.google.com")); // 子域名
         assert!(router.is_allowed("mail.google.com"));
         assert!(!router.is_allowed("evil.com"));
     }
@@ -140,7 +144,7 @@ mod tests {
     #[test]
     fn test_wildcard_subdomain_only() {
         let router = Router::new(create_test_config(vec!["*.google.com"]));
-        assert!(!router.is_allowed("google.com"));     // 不包括自身
+        assert!(!router.is_allowed("google.com")); // 不包括自身
         assert!(router.is_allowed("www.google.com"));
         assert!(router.is_allowed("mail.google.com"));
         assert!(!router.is_allowed("evil.com"));
@@ -152,9 +156,9 @@ mod tests {
         assert!(router.is_allowed("web.prod.db.internal"));
         assert!(router.is_allowed("api.prod.cache.internal"));
         assert!(router.is_allowed("app.prod.api.internal"));
-        assert!(router.is_allowed("dev.prod.db.internal"));   // 也匹配
-        assert!(!router.is_allowed("web.dev.db.internal"));   // 第二段不是 prod
-        assert!(!router.is_allowed("web.prod.db.com"));      // 不是 .internal 结尾
+        assert!(router.is_allowed("dev.prod.db.internal")); // 也匹配
+        assert!(!router.is_allowed("web.dev.db.internal")); // 第二段不是 prod
+        assert!(!router.is_allowed("web.prod.db.com")); // 不是 .internal 结尾
     }
 
     #[test]
@@ -163,8 +167,8 @@ mod tests {
         assert!(router.is_allowed("api.example.com"));
         assert!(router.is_allowed("api.foo.com"));
         assert!(router.is_allowed("api.bar.com"));
-        assert!(!router.is_allowed("api.com"));         // 中间必须有内容
-        assert!(!router.is_allowed("www.api.com"));     // 前缀不匹配
+        assert!(!router.is_allowed("api.com")); // 中间必须有内容
+        assert!(!router.is_allowed("www.api.com")); // 前缀不匹配
     }
 
     #[test]
@@ -180,7 +184,7 @@ mod tests {
         let router = Router::new(create_test_config(vec![
             "*.google.com",
             "api.*.com",
-            "*.prod.*.internal"
+            "*.prod.*.internal",
         ]));
         assert!(router.is_allowed("www.google.com"));
         assert!(router.is_allowed("mail.google.com"));

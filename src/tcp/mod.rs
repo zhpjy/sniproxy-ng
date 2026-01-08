@@ -10,10 +10,13 @@ use tracing::{info, debug, error, warn};
 
 /// 运行 TCP 代理服务器 (HTTP/1.1 + TLS)
 pub async fn run(config: Config) -> Result<()> {
-    info!("Starting TCP proxy server on {}", config.server.listen_addr);
+    let listen_addr = config.server.listen_https_addr
+        .ok_or_else(|| anyhow!("HTTPS listen address not configured"))?;
 
-    let listener = TcpListener::bind(&config.server.listen_addr).await?;
-    info!("TCP proxy server listening on {}", config.server.listen_addr);
+    info!("Starting TCP proxy server on {}", listen_addr);
+
+    let listener = TcpListener::bind(&listen_addr).await?;
+    info!("TCP proxy server listening on {}", listen_addr);
 
     // 创建路由器
     let router = Arc::new(Router::new(config.clone()));
@@ -210,7 +213,7 @@ mod tests {
         // 简单的配置解析测试
         let toml_str = r#"
 [server]
-listen_addr = "127.0.0.1:8443"
+listen_https_addr = "127.0.0.1:8443"
 log_level = "debug"
 
 [socks5]
@@ -222,7 +225,7 @@ allow = ["*.google.com", "api.*.com"]
 "#;
 
         let config: Config = toml::from_str(toml_str).unwrap();
-        assert_eq!(config.server.listen_addr.port(), 8443);
+        assert_eq!(config.server.listen_https_addr.unwrap().port(), 8443);
         assert_eq!(config.socks5.addr.port(), 1080);
     }
 }

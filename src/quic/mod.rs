@@ -45,16 +45,19 @@ use std::sync::Arc;
 ///
 /// 接收 UDP packets，提取 SNI，管理会话，通过 SOCKS5 UDP relay 转发流量
 pub async fn run(config: Config) -> AnyhowResult<()> {
+    let listen_addr = config.server.listen_https_addr
+        .ok_or_else(|| anyhow::anyhow!("HTTPS listen address not configured"))?;
+
     info!(
         "Starting QUIC/HTTP3 proxy server on {}",
-        config.server.listen_addr
+        listen_addr
     );
     info!("QUIC SNI extraction module loaded");
     info!("Waiting for QUIC Initial packets...");
 
     // 绑定 UDP socket
-    let socket = Arc::new(UdpSocket::bind(&config.server.listen_addr).await?);
-    info!("UDP socket bound to {}", config.server.listen_addr);
+    let socket = Arc::new(UdpSocket::bind(&listen_addr).await?);
+    info!("UDP socket bound to {}", listen_addr);
 
     // 创建路由器
     let router = Router::new(config.clone());

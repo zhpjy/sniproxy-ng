@@ -4,6 +4,7 @@ mod tcp;
 mod quic;
 mod socks5;
 mod router;
+mod http;
 
 use anyhow::Result;
 use tracing::{info, error, warn};
@@ -29,7 +30,6 @@ async fn main() -> Result<()> {
     };
     info!("Configuration loaded successfully");
 
-    info!("Server will listen on {}", config.server.listen_addr);
     info!("SOCKS5 backend: {}", config.socks5.addr);
     if config.rules.allow.is_empty() {
         info!("Whitelist: allowing all domains (no rules configured)");
@@ -37,16 +37,60 @@ async fn main() -> Result<()> {
         info!("Whitelist: {} domain patterns", config.rules.allow.len());
     }
 
-    // 检查端口是否需要权限
-    if config.server.listen_addr.port() < 1024 {
-        warn!("Warning: Port {} requires root privileges. Run with sudo if binding fails.", config.server.listen_addr.port());
+    // 创建路由器
+    let router = std::sync::Arc::new(router::Router::new(config.clone()));
+    let mut tasks = Vec::new();
+
+    // HTTPS 监听器 (TCP + QUIC)
+    if let Some(addr) = config.server.listen_https_addr {
+        info!("HTTPS listener configured on {}", addr);
+
+        // 检查端口是否需要权限
+        if addr.port() < 1024 {
+            warn!("Warning: Port {} requires root privileges. Run with sudo if binding fails.", addr.port());
+        }
+
+        let https_config = config.clone();
+        let https_router = router.clone();
+
+        // TCP 监听器
+        let tcp_config = https_config.clone();
+        tasks.push(tokio::spawn(async move {
+            if let Err(e) = tcp::run(tcp_config).await {
+                error!("TCP listener error: {}", e);
+            }
+        }));
+
+        // UDP 监听器 (QUIC/HTTP3)
+        tasks.push(tokio::spawn(async move {
+            if let Err(e) = quic::run(https_config).await {
+                error!("QUIC listener error: {}", e);
+            }
+        }));
     }
 
-    // 启动 TCP 监听器 (HTTP/1.1 + TLS)
-    let mut tcp_handle = tokio::spawn(tcp::run(config.clone()));
+    // HTTP 监听器
+    if let Some(addr) = config.server.listen_http_addr {
+        info!("HTTP listener configured on {}", addr);
 
-    // 启动 UDP 监听器 (QUIC/HTTP3)
-    let mut quic_handle = tokio::spawn(quic::run(config.clone()));
+        // 检查端口是否需要权限
+        if addr.port() < 1024 {
+            warn!("Warning: Port {} requires root privileges. Run with sudo if binding fails.", addr.port());
+        }
+
+        let http_config = config.clone();
+        let http_router = router.clone();
+        tasks.push(tokio::spawn(async move {
+            if let Err(e) = http::run(http_config, http_router).await {
+                error!("HTTP listener error: {}", e);
+            }
+        }));
+    }
+
+    // 检查是否至少配置了一个监听器
+    if tasks.is_empty() {
+        anyhow::bail!("No listener configured. Please set listen_https_addr or listen_http_addr in config.");
+    }
 
     // 设置 Ctrl+C 信号处理
     let ctrl_c = tokio::signal::ctrl_c();
@@ -56,20 +100,15 @@ async fn main() -> Result<()> {
         _ = ctrl_c => {
             info!("Received shutdown signal, shutting down...");
         }
-        // TCP 任务结束（通常不应该发生）
-        result = &mut tcp_handle => {
-            match result {
-                Ok(Ok(())) => info!("TCP task ended normally"),
-                Ok(Err(e)) => error!("TCP task failed: {}", e),
-                Err(e) => error!("TCP task panicked: {}", e),
+        // 等待任意任务结束
+        result = async {
+            for task in tasks {
+                task.await.ok();
             }
-        }
-        // QUIC 任务结束（通常不应该发生）
-        result = &mut quic_handle => {
-            match result {
-                Ok(Ok(())) => info!("QUIC task ended normally"),
-                Ok(Err(e)) => error!("QUIC task failed: {}", e),
-                Err(e) => error!("QUIC task panicked: {}", e),
+            Ok::<(), anyhow::Error>(())
+        } => {
+            if let Err(e) = result {
+                error!("Task error: {}", e);
             }
         }
     }
