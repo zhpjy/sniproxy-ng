@@ -1,6 +1,8 @@
 # sniproxy-ng
 
-下一代 SNI 代理服务器,支持 QUIC/HTTP3 和 HTTP/1.1,通过 SOCKS5 代理转发流量。
+下一代 SNI 代理服务器,支持 HTTP/1.1 和 HTTP/2,通过 SOCKS5 代理转发流量。
+
+> **注意**: QUIC/HTTP3 支持受限,详见下方说明。
 
 ## 功能特性
 
@@ -10,10 +12,23 @@
   - 支持 UDP ASSOCIATE
   - 支持用户名/密码认证
 - ✅ **TCP 代理** - 完整的 HTTP/1.1 和 HTTPS 代理功能
-- 🚧 **QUIC/HTTP3 支持** - 开发中
+- ⚠️ **QUIC/HTTP3 支持** - 受限 (详见下方)
 - ✅ **结构化日志** - 使用 tracing 框架
 - ✅ **配置管理** - TOML 格式配置文件
 - ✅ **高性能** - 基于 Tokio 异步运行时
+
+## QUIC/HTTP3 限制说明
+
+由于 QUIC 协议使用 TLS 1.3 加密整个握手过程,**SNI (Server Name Indication) 不再以明文传输**。这意味着:
+
+- ❌ **无法直接提取 QUIC 的 SNI** (RFC 9001 规定 TLS 1.3 ClientHello 完全加密)
+- ✅ **TCP/HTTP/1.1 和 HTTP/2 的 SNI 提取完全正常**
+- 📝 详见 [QUIC 实现说明文档](docs/QUIC_IMPLEMENTATION_NOTES.md)
+
+**替代方案**:
+1. 使用 TCP 代理 (适用于 HTTP/1.1, HTTP/2)
+2. 配置文件预定义路由规则
+3. QUIC 终端代理 (需要 SSL 证书,未来版本)
 
 ## 使用场景
 
