@@ -168,7 +168,7 @@ pub fn decode_packet_number(truncated_pn: &[u8], expected_pn: u64) -> Result<u64
     {
         candidate
     } else if candidate > expected_pn + pn_hwin {
-        candidate - pn_win
+        candidate.saturating_sub(pn_win)
     } else {
         candidate + pn_win
     };
