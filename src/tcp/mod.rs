@@ -1,6 +1,5 @@
 use crate::config::Config;
-use crate::socks5::{Socks5Client, ConnectionPool, PoolConfig, PooledConnectionGuard};
-use crate::socks5::Socks5TcpStream;
+use crate::socks5::{Socks5Client, ConnectionPool, PoolConfig};
 use crate::tls::sni::extract_sni;
 use crate::router::Router;
 use anyhow::{Result, anyhow, bail};

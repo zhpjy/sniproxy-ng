@@ -14,7 +14,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::net::UdpSocket;
 use tokio::sync::Mutex;
-use tracing::{info, debug, warn, error};
+use tracing::{info, debug, warn};
 use fast_socks5::client::Socks5Datagram;
 
 /// 会话配置
@@ -133,7 +133,7 @@ impl QuicSessionManager {
     /// 转发到现有会话
     async fn forward_to_existing_session(&self, dcid: &[u8], packet: &[u8]) -> Result<bool> {
         // 获取会话中的 relay 地址
-        let (relay_addr, socks5_relay) = {
+        let (_relay_addr, _socks5_relay) = {
             let mut inner = self.inner.lock().await;
             if let Some(session) = inner.sessions.get_mut(dcid) {
                 session.last_active = Instant::now();
@@ -193,7 +193,7 @@ impl QuicSessionManager {
         }
 
         // 创建 SOCKS5 UDP relay
-        let (socks5_relay, relay_addr, socket) = {
+        let (socks5_relay, relay_addr, _socket) = {
             let inner = self.inner.lock().await;
             let socket = Arc::clone(&inner.socket);
 

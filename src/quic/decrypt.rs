@@ -5,7 +5,6 @@
 
 use crate::quic::crypto::InitialKeys;
 use crate::quic::error::{QuicError, Result};
-use crate::quic::header::decode_packet_number;
 use crate::quic::parser::parse_varint;
 use crate::tls::sni::extract_sni;
 use ring::aead::{Aad, LessSafeKey, Nonce, UnboundKey, AES_128_GCM};
@@ -45,7 +44,7 @@ pub fn extract_sni_from_quic_initial(packet: &mut [u8]) -> Result<Option<String>
     debug!("Initial keys derived from DCID");
 
     // Step 3: 移除 Header Protection
-    let (unprotected_first_byte, packet_number, pn_len) =
+    let (_unprotected_first_byte, packet_number, pn_len) =
         crate::quic::remove_header_protection(packet, header.pn_offset, &keys)?;
     debug!("Header protection removed: PN={}", packet_number);
 

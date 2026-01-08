@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, Semaphore};
-use tracing::{debug, warn, info};
+use tracing::{debug, info};
 
 /// 连接池配置
 #[derive(Clone)]
@@ -186,7 +186,7 @@ impl ConnectionPool {
         let now = Instant::now();
         let mut removed = 0;
 
-        idle.retain(|key, conns| {
+        idle.retain(|_key, conns| {
             conns.retain(|conn| {
                 let idle_time = now.duration_since(conn.last_used);
                 let age = now.duration_since(conn.created_at);

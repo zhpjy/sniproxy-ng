@@ -151,7 +151,7 @@ pub fn decode_packet_number(truncated_pn: &[u8], expected_pn: u64) -> Result<u64
 
     // 将截断的 PN 转换为整数
     let mut truncated = 0u64;
-    for (i, &byte) in truncated_pn.iter().enumerate() {
+    for (_i, &byte) in truncated_pn.iter().enumerate() {
         truncated = (truncated << 8) | (byte as u64);
     }
 
