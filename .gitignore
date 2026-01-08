@@ -22,5 +22,8 @@ Cargo.lock
 .DS_Store
 Thumbs.db
 
+# Git Worktrees
+.worktrees/
+
 # Config (不要提交包含敏感信息的配置)
 config.toml
