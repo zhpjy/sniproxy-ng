@@ -16,6 +16,15 @@ pub const INITIAL_SALT_V1: &[u8] = &[
     0x4b, 0x9c, 0x5d, 0x3a, 0x1a,
 ];
 
+/// RFC 9001 Section A.4 - QUIC Version 2 Initial Salt
+///
+/// QUIC v2 使用不同的 Salt 值进行密钥派生。
+/// ⚠️ 重要: 这个值是 QUIC v2 标准规定的，不能更改！
+pub const INITIAL_SALT_V2: &[u8] = &[
+    0x1d, 0x32, 0xf7, 0xb5, 0xe4, 0xe4, 0xc5, 0x93, 0x5a, 0x83, 0xdf, 0x15, 0xa3, 0x33, 0x73,
+    0x12, 0x61, 0x9b, 0xc1, 0xab,
+];
+
 /// QUIC Initial Packet 加密密钥
 ///
 /// 包含三个密钥:
@@ -45,6 +54,7 @@ pub struct InitialKeys {
 ///
 /// # 参数
 /// - `dcid`: Destination Connection ID (用于密钥派生)
+/// - `version`: QUIC 版本号 (用于选择正确的 Initial Salt)
 ///
 /// # 返回
 /// - 包含 key, iv, hp_key 的 InitialKeys 结构
@@ -52,17 +62,35 @@ pub struct InitialKeys {
 /// # 示例
 /// ```ignore
 /// let dcid = vec![0x01, 0x02, 0x03, 0x04];
-/// let keys = derive_initial_keys(&dcid)?;
+/// let keys = derive_initial_keys(&dcid, 0x00000001)?;
 /// assert_eq!(keys.key.len(), 16);
 /// assert_eq!(keys.iv.len(), 12);
 /// assert_eq!(keys.hp_key.len(), 16);
 /// ```
-pub fn derive_initial_keys(dcid: &[u8]) -> Result<InitialKeys> {
-    debug!("Deriving initial keys from DCID: {:?} ({} bytes)", dcid, dcid.len());
+pub fn derive_initial_keys(dcid: &[u8], version: u32) -> Result<InitialKeys> {
+    debug!("Deriving initial keys from DCID: {:?} ({} bytes), version: {:#x}",
+           dcid, dcid.len(), version);
 
     // Step 1: HKDF-Extract
     // RFC 9001: initial_secret = HKDF-Extract(salt, dcid)
-    let salt = Salt::new(HKDF_SHA256, INITIAL_SALT_V1);
+    // 根据 QUIC 版本选择正确的 Salt
+    let salt_bytes = match version {
+        0x00000001 => {
+            debug!("Using QUIC v1 Initial Salt");
+            INITIAL_SALT_V1
+        }
+        0x709a50c4 => {
+            debug!("Using QUIC v2 Initial Salt");
+            INITIAL_SALT_V2
+        }
+        _ => {
+            // 未知版本，默认使用 v1 salt（向后兼容）
+            debug!("Unknown QUIC version {:#x}, defaulting to v1 salt", version);
+            INITIAL_SALT_V1
+        }
+    };
+
+    let salt = Salt::new(HKDF_SHA256, salt_bytes);
     let initial_secret = salt.extract(dcid);
 
     debug!("Initial secret derived: {} bytes", 32);
@@ -249,7 +277,7 @@ mod tests {
             0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08,
         ];
 
-        let keys = derive_initial_keys(&dcid).expect("Failed to derive keys");
+        let keys = derive_initial_keys(&dcid, 0x00000001).expect("Failed to derive keys");
 
         // 验证长度
         assert_eq!(keys.key.len(), 16, "Key length should be 16 bytes");
@@ -302,8 +330,8 @@ mod tests {
     fn test_derive_keys_deterministic() {
         let dcid = [0x01, 0x02, 0x03, 0x04];
 
-        let keys1 = derive_initial_keys(&dcid).unwrap();
-        let keys2 = derive_initial_keys(&dcid).unwrap();
+        let keys1 = derive_initial_keys(&dcid, 0x00000001).unwrap();
+        let keys2 = derive_initial_keys(&dcid, 0x00000001).unwrap();
 
         // 相同的 DCID 应该派生出相同的密钥
         assert_eq!(keys1.key, keys2.key);
@@ -316,8 +344,8 @@ mod tests {
         let dcid1 = [0x01, 0x02, 0x03, 0x04];
         let dcid2 = [0x01, 0x02, 0x03, 0x05];
 
-        let keys1 = derive_initial_keys(&dcid1).unwrap();
-        let keys2 = derive_initial_keys(&dcid2).unwrap();
+        let keys1 = derive_initial_keys(&dcid1, 0x00000001).unwrap();
+        let keys2 = derive_initial_keys(&dcid2, 0x00000001).unwrap();
 
         // 不同的 DCID 应该派生出不同的密钥
         assert_ne!(keys1.key, keys2.key);
@@ -330,7 +358,7 @@ mod tests {
         let dcid = [];
 
         // 空的 DCID 也是有效的 (虽然不常见)
-        let keys = derive_initial_keys(&dcid).expect("Empty DCID should work");
+        let keys = derive_initial_keys(&dcid, 0x00000001).expect("Empty DCID should work");
 
         assert_eq!(keys.key.len(), 16);
         assert_eq!(keys.iv.len(), 12);
@@ -342,7 +370,7 @@ mod tests {
         // QUIC 允许最大 20 字节的 Connection ID
         let dcid: Vec<u8> = (0..20).collect();
 
-        let keys = derive_initial_keys(&dcid).expect("Long DCID should work");
+        let keys = derive_initial_keys(&dcid, 0x00000001).expect("Long DCID should work");
 
         assert_eq!(keys.key.len(), 16);
         assert_eq!(keys.iv.len(), 12);

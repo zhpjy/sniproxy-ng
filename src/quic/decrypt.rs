@@ -33,6 +33,7 @@ use tracing::{debug, info};
 /// ```
 pub fn extract_sni_from_quic_initial(packet: &mut [u8]) -> Result<Option<String>> {
     info!("Starting QUIC SNI extraction (packet length: {})", packet.len());
+    info!("Raw packet header (first 32 bytes): {:02x?}", &packet[..packet.len().min(32)]);
 
     // Step 1: 解析 Initial Header
     let header = crate::quic::parse_initial_header(packet)?;
@@ -40,7 +41,9 @@ pub fn extract_sni_from_quic_initial(packet: &mut [u8]) -> Result<Option<String>
            header.version, header.dcid.len());
 
     // Step 2: 派生 Initial Keys
-    let keys = crate::quic::derive_initial_keys(&header.dcid)?;
+    debug!("Deriving keys from DCID: {:02x?} ({} bytes), version: {:#x}",
+           header.dcid, header.dcid.len(), header.version);
+    let keys = crate::quic::derive_initial_keys(&header.dcid, header.version)?;
     debug!("Initial keys derived from DCID");
 
     // Step 3: 移除 Header Protection
@@ -107,6 +110,8 @@ fn extract_and_decrypt_crypto_frame(
     let encrypted_payload = &packet[payload_start..];
 
     // 先解密整个 payload (QUIC 中 frame type 也是加密的)
+    debug!("About to decrypt: payload_len={}, packet_number={}, pn_offset={}",
+           encrypted_payload.len(), packet_number, pn_offset);
     let decrypted_payload = decrypt_crypto_payload(encrypted_payload, packet_number, keys)?;
     debug!("Decrypted payload: {} bytes, first 10 bytes: {:02x?}", decrypted_payload.len(), &decrypted_payload[..decrypted_payload.len().min(10)]);
 
@@ -245,6 +250,11 @@ fn decrypt_crypto_payload(
     let ciphertext_len = encrypted.len() - TAG_LEN;
     let ciphertext = &encrypted[..ciphertext_len];
     let tag = &encrypted[ciphertext_len..];
+
+    debug!("Decrypting: ciphertext_len={}, tag_len={}, pn={}",
+           ciphertext_len, TAG_LEN, packet_number);
+    debug!("Key: {:02x?}", keys.key);
+    debug!("IV: {:02x?}", keys.iv);
 
     // 构造 nonce: IV xor Packet Number
     // RFC 9001: nonce = IV ^ (packet_number as big-endian)
