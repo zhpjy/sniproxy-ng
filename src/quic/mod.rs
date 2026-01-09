@@ -33,6 +33,7 @@ pub mod session;
 pub use parser::parse_initial_header;
 pub use crypto::derive_initial_keys;
 pub use header::remove_header_protection;
+pub use decrypt::extract_sni_from_quic_initial;
 
 use crate::config::Config;
 use crate::router::Router;

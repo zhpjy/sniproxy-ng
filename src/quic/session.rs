@@ -5,7 +5,6 @@
 use crate::config::Socks5Config;
 use crate::router::Router;
 use crate::socks5::udp::Socks5UdpClient;
-use crate::quic::parser::extract_dcid;
 use crate::quic::decrypt::extract_sni_from_quic_initial;
 use anyhow::{Result, anyhow};
 use std::collections::HashMap;
@@ -15,7 +14,7 @@ use std::time::{Duration, Instant};
 use tokio::net::UdpSocket;
 use tokio::sync::Mutex;
 use tracing::{info, debug, warn};
-use fast_socks5::client::Socks5Datagram;
+use tokio::sync::mpsc;
 
 /// 会话配置
 #[derive(Clone)]
@@ -42,12 +41,12 @@ pub struct QuicSession {
     pub dcid: Vec<u8>,
     /// 提取的 SNI
     pub sni: String,
-    /// SOCKS5 UDP relay
-    pub socks5_relay: Socks5Datagram<tokio::net::TcpStream>,
-    /// SOCKS5 relay 地址
-    pub relay_addr: SocketAddr,
+    /// 目标服务器地址（SNI 解析出来的 ip:port，通常是 :443）
+    pub target_addr: SocketAddr,
     /// 客户端地址
     pub client_addr: SocketAddr,
+    /// 发往该会话的客户端 QUIC 包（由会话任务负责通过 SOCKS5 UDP 发往 target_addr）
+    pub tx: mpsc::Sender<Vec<u8>>,
     /// 最后活跃时间
     pub last_active: Instant,
     /// 创建时间
@@ -56,8 +55,12 @@ pub struct QuicSession {
 
 /// 会话管理器内部状态
 struct SessionManagerInner {
-    /// 活动会话: dcid -> session
-    sessions: HashMap<Vec<u8>, QuicSession>,
+    /// 活动会话: client_addr -> session
+    ///
+    /// 说明：QUIC 后续大量数据包会是 Short Header，无法可靠地从旁路解析出
+    /// 连接 ID 长度/值来做无状态识别；因此我们采用更工程化的 5-tuple 方式：
+    /// 一旦为某个 client_addr 建立会话，则转发该 client_addr 的全部 UDP 包。
+    sessions: HashMap<SocketAddr, QuicSession>,
     /// 会话配置
     config: QuicSessionConfig,
     /// 路由器 (白名单检查)
@@ -107,71 +110,54 @@ impl QuicSessionManager {
     ///
     /// 返回 Ok(true) 表示已转发，Ok(false) 表示未处理（非 QUIC 包）
     pub async fn handle_packet(&self, packet: &[u8], src: SocketAddr) -> Result<bool> {
-        // 1. 提取 DCID
-        let dcid = match extract_dcid(packet) {
-            Ok(d) => d.to_vec(),
-            Err(_) => {
-                // 不是 QUIC Initial 包，忽略
-                debug!("Not a QUIC Initial packet from {}", src);
-                return Ok(false);
-            }
-        };
-
-        // 2. 查找现有会话
-        {
-            let inner = self.inner.lock().await;
-            if inner.sessions.contains_key(&dcid) {
-                // 会话存在，需要更新活跃时间并转发
-                drop(inner);
-                return self.forward_to_existing_session(&dcid, packet).await;
-            }
+        // 1) 优先按 client_addr 查找现有会话（用于转发后续 Short Header 包）
+        if self.has_session(src).await {
+            return self.forward_to_existing_session(src, packet).await;
         }
 
-        // 3. 会话不存在，尝试创建新会话
-        self.create_and_forward_session(&dcid, packet, src).await
+        // 2) 无会话：只尝试从 QUIC Initial 提取 SNI 并建会话
+        self.create_and_forward_session(packet, src).await
+    }
+
+    async fn has_session(&self, client: SocketAddr) -> bool {
+        let inner = self.inner.lock().await;
+        inner.sessions.contains_key(&client)
     }
 
     /// 转发到现有会话
-    async fn forward_to_existing_session(&self, dcid: &[u8], packet: &[u8]) -> Result<bool> {
-        // 获取会话中的 relay 地址
-        let (_relay_addr, _socks5_relay) = {
+    async fn forward_to_existing_session(&self, client: SocketAddr, packet: &[u8]) -> Result<bool> {
+        let tx = {
             let mut inner = self.inner.lock().await;
-            if let Some(session) = inner.sessions.get_mut(dcid) {
-                session.last_active = Instant::now();
-                // Socks5Datagram 不实现 Clone，但我们需要在锁外使用
-                // 由于 QUIC session 创建后 relay 地址不变，我们直接通过 relay 发送
-                (session.relay_addr, &session.socks5_relay as *const _ as usize)
-            } else {
+            let Some(session) = inner.sessions.get_mut(&client) else {
                 return Ok(false);
-            }
+            };
+            session.last_active = Instant::now();
+            session.tx.clone()
         };
 
-        // 实际上我们需要使用 Socks5Datagram 发送，重新获取
-        let result = {
-            let inner = self.inner.lock().await;
-            if let Some(session) = inner.sessions.get(dcid) {
-                // 通过 SOCKS5 relay 发送包
-                session
-                    .socks5_relay
-                    .send_to(packet, session.relay_addr)
-                    .await
-                    .map_err(|e| anyhow!("Failed to send via SOCKS5 relay: {}", e))?;
-                Ok(true)
-            } else {
-                Ok(false)
-            }
-        };
+        tx.send(packet.to_vec())
+            .await
+            .map_err(|_| anyhow!("QUIC session task is gone (client={})", client))?;
 
-        result
+        Ok(true)
     }
 
     /// 创建新会话并转发
     async fn create_and_forward_session(
         &self,
-        dcid: &[u8],
         packet: &[u8],
         src: SocketAddr,
     ) -> Result<bool> {
+        // 仅处理 QUIC Initial。不是 Initial 直接忽略。
+        let header = match crate::quic::parse_initial_header(packet) {
+            Ok(h) => h,
+            Err(_) => {
+                debug!("Not a QUIC Initial packet from {}", src);
+                return Ok(false);
+            }
+        };
+        let dcid = header.dcid.to_vec();
+
         // 提取 SNI
         let mut packet_copy = packet.to_vec();
         let sni = match extract_sni_from_quic_initial(&mut packet_copy)? {
@@ -193,8 +179,15 @@ impl QuicSessionManager {
             }
         }
 
+        // 解析目标地址：SNI -> ip:443
+        let target_addr = tokio::net::lookup_host((sni.as_str(), 443))
+            .await
+            .map_err(|e| anyhow!("Failed to resolve {}:443: {}", sni, e))?
+            .next()
+            .ok_or_else(|| anyhow!("No A/AAAA record for {}:443", sni))?;
+
         // 创建 SOCKS5 UDP relay
-        let (socks5_relay, relay_addr, _socket) = {
+        let (socks5_relay, relay_addr, socket) = {
             let inner = self.inner.lock().await;
             let socket = Arc::clone(&inner.socket);
 
@@ -212,33 +205,73 @@ impl QuicSessionManager {
         };
 
         info!(
-            "Created QUIC session: DCID={:?}, SNI={}, relay={}",
-            dcid, sni, relay_addr
+            "Created QUIC session: DCID={:?}, SNI={}, target={}, socks5_relay={}",
+            dcid, sni, target_addr, relay_addr
         );
+
+        // 会话任务：负责双向 UDP 转发
+        let (tx, mut rx) = mpsc::channel::<Vec<u8>>(1024);
+        let dcid_for_task = dcid.to_vec();
+        tokio::spawn(async move {
+            let relay = socks5_relay;
+            let mut buf = vec![0u8; 2048];
+
+            loop {
+                tokio::select! {
+                    maybe_pkt = rx.recv() => {
+                        let Some(pkt) = maybe_pkt else {
+                            // sender dropped => session removed
+                            debug!("QUIC session task exiting (dcid={:?})", dcid_for_task);
+                            return;
+                        };
+
+                        // 注意：Socks5Datagram::send_to 的目标应该是“真实远端地址”，不是 SOCKS5 relay_addr
+                        if let Err(e) = relay.send_to(&pkt, target_addr).await {
+                            warn!("QUIC session send_to failed (dcid={:?}, target={}): {}", dcid_for_task, target_addr, e);
+                            return;
+                        }
+                    }
+                    recv_res = relay.recv_from(&mut buf) => {
+                        match recv_res {
+                            Ok((n, _remote)) => {
+                                if n == 0 {
+                                    continue;
+                                }
+                                // 返回客户端：从同一个本地 UDP socket 发回，保持五元组一致
+                                if let Err(e) = socket.send_to(&buf[..n], src).await {
+                                    warn!("QUIC session failed to send back to client (dcid={:?}, client={}): {}", dcid_for_task, src, e);
+                                    return;
+                                }
+                            }
+                            Err(e) => {
+                                warn!("QUIC session recv_from failed (dcid={:?}): {}", dcid_for_task, e);
+                                return;
+                            }
+                        }
+                    }
+                }
+            }
+        });
 
         // 创建会话
         let session = QuicSession {
             dcid: dcid.to_vec(),
             sni,
-            socks5_relay,
-            relay_addr,
+            target_addr,
             client_addr: src,
+            tx,
             last_active: Instant::now(),
             created_at: Instant::now(),
         };
 
-        // 转发第一个包
-        session
-            .socks5_relay
-            .send_to(packet, session.relay_addr)
-            .await
-            .map_err(|e| anyhow!("Failed to send via SOCKS5 relay: {}", e))?;
-
         // 保存会话
         {
             let mut inner = self.inner.lock().await;
-            inner.sessions.insert(dcid.to_vec(), session);
+            inner.sessions.insert(src, session);
         }
+
+        // 转发第一个包（通过会话 task）
+        self.forward_to_existing_session(src, packet).await?;
 
         Ok(true)
     }

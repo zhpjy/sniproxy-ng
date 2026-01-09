@@ -12,9 +12,13 @@ use crate::http::{HttpError, Result};
 ///
 /// # 示例
 /// ```
+/// use sniproxy_ng::http::extract_host;
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+///
 /// let request = b"GET / HTTP/1.1\r\nHost: www.example.com\r\n\r\n";
 /// let host = extract_host(request)?;
 /// assert_eq!(host, "www.example.com");
+/// # Ok(()) }
 /// ```
 pub fn extract_host(buf: &[u8]) -> Result<String> {
     let request = std::str::from_utf8(buf)?;

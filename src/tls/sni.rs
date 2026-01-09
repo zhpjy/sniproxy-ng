@@ -29,33 +29,41 @@ impl fmt::Display for SniError {
 impl std::error::Error for SniError {}
 
 pub fn extract_sni(data: &[u8]) -> Result<Option<String>> {
-    if data.len() < 5 {
-        bail!(SniError::DataTooShort);
-    }
+    // 支持两种输入：
+    // 1) 传统 TCP+TLS：TLS record layer（开头 0x16）
+    // 2) QUIC CRYPTO stream：直接携带 TLS Handshake message（开头 0x01）
+    let payload: &[u8] = if data.first().copied() == Some(0x16) {
+        // TLS record: [type(1)=0x16][version(2)][len(2)][handshake...]
+        if data.len() < 5 {
+            bail!(SniError::DataTooShort);
+        }
+        let length = u16::from_be_bytes([data[3], data[4]]) as usize;
+        if data.len() < 5 + length {
+            bail!(SniError::DataTooShort);
+        }
+        &data[5..5 + length]
+    } else {
+        // QUIC CRYPTO: raw TLS handshake bytes
+        data
+    };
 
-    let content_type = data[0];
-    let length = u16::from_be_bytes([data[3], data[4]]) as usize;
-
-    if content_type != 0x16 {
-        bail!(SniError::NotHandshake);
-    }
-
-    if data.len() < 5 + length {
-        bail!(SniError::DataTooShort);
-    }
-
-    let payload = &data[5..5 + length];
     if payload.len() < 4 {
         bail!(SniError::DataTooShort);
     }
 
+    // TLS Handshake: [msg_type(1)][len(3)][body...]
     let handshake_type = payload[0];
-
     if handshake_type != 0x01 {
-        bail!(SniError::NotClientHello);
+        // QUIC 场景下这里通常就是 0x01；如果不是，说明我们拿到的不是 ClientHello 起始处
+        bail!(SniError::NotHandshake);
     }
 
-    let client_hello = &payload[4..];
+    let hs_len = ((payload[1] as usize) << 16) | ((payload[2] as usize) << 8) | (payload[3] as usize);
+    if payload.len() < 4 + hs_len {
+        bail!(SniError::DataTooShort);
+    }
+
+    let client_hello = &payload[4..4 + hs_len];
 
     if client_hello.len() < 38 {
         bail!(SniError::DataTooShort);

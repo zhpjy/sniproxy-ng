@@ -6,7 +6,7 @@
 
 - **HTTPS (443)** - 从 TLS ClientHello 提取 SNI
 - **HTTP (80)** - 从 Host 请求头提取域名
-- **QUIC/HTTP3 支持** - 解密 Initial Packet 提取 SNI
+- **QUIC/HTTP3（best-effort）** - 仅解密 QUIC Initial Packet 提取 SNI，用于白名单/放行决策，然后做 UDP 透明转发（不终止 QUIC，不解析 HTTP/3）
 - **SOCKS5 转发** - TCP CONNECT 和 UDP ASSOCIATE
 - **域名白名单** - 灵活的通配符匹配
 - **连接池** - TCP 和 QUIC 会话复用
