@@ -6,7 +6,7 @@
 use crate::quic::crypto::InitialKeys;
 use crate::quic::error::{QuicError, Result};
 use ring::aead::quic::{HeaderProtectionKey, AES_128};
-use tracing::debug;
+use tracing::{debug, info, warn};
 
 /// 移除 QUIC Initial Packet 的 Header Protection
 ///
@@ -32,7 +32,7 @@ pub fn remove_header_protection(
     keys: &InitialKeys,
 ) -> Result<(u8, u64, u8)> {
     // 检查包长度
-    // 最小长度: pn_offset + 4 (sample) + 16 (sample length)
+    // 最小长度：pn_offset + 4 (sample) + 16 (sample length)
     if packet.len() < pn_offset + 4 {
         return Err(QuicError::PacketTooShort {
             expected: pn_offset + 4,
@@ -40,11 +40,15 @@ pub fn remove_header_protection(
         });
     }
 
-    // 获取 protected first byte 以确定 PN length
+    // 注意：Packet Number Length (低 2 bits) 是被 header protection 保护的，
+    // 不能从 protected first byte 可靠地读取。
+    // 正确流程：先用 sample 生成 mask → 解除 first byte 保护 → 再从 unprotected first byte 读取 PN length。
     let protected_first_byte = packet[0];
     let protected_pn_len = (protected_first_byte & 0x03) + 1;
-
-    debug!("Protected PN length: {}", protected_pn_len);
+    info!(
+        "Protected first byte: {:#04x}, protected_pn_len(UNRELIABLE): {}",
+        protected_first_byte, protected_pn_len
+    );
 
     // 计算 sample 位置
     // RFC 9001: sample 是从 PN 字段开始的第 4 个字节
@@ -59,7 +63,8 @@ pub fn remove_header_protection(
     }
 
     let sample = &packet[sample_start..sample_end];
-    debug!("Sample offset: {}, length: 16", sample_start);
+    info!("Sample: start={}, end={}, first 16 bytes: {:02x?}",
+           sample_start, sample_end, sample);
 
     // 创建 Header Protection Key
     let hp_key = HeaderProtectionKey::new(&AES_128, &keys.hp_key)
@@ -69,7 +74,7 @@ pub fn remove_header_protection(
     let mask = hp_key.new_mask(sample)
         .map_err(|e| QuicError::HeaderProtectionFailed(format!("Failed to generate mask: {:?}", e)))?;
 
-    debug!("Mask generated: {:02x?}", mask);
+    info!("Mask generated: {:02x?}", mask);
 
     // 解密 first byte
     // 只需要修改低 4 bits (packet number length)
@@ -81,19 +86,17 @@ pub fn remove_header_protection(
         protected_first_byte, unprotected_first_byte
     );
 
-    // 从 unprotected first byte 获取 PN length
-    // 注意：某些实现可能不一致，我们使用最初检测的长度
-    let _unprotected_pn_len = (unprotected_first_byte & 0x03) + 1;
-    // 如果长度不一致，使用最初检测的长度 (更宽容)
-    let pn_len = if _unprotected_pn_len != protected_pn_len {
-        debug!("PN length mismatch detected, using protected length: {}", protected_pn_len);
-        protected_pn_len
-    } else {
-        debug!("Unprotected PN length: {}", _unprotected_pn_len);
-        _unprotected_pn_len
-    };
+    // 从 unprotected first byte 获取 PN length (RFC 9001 Section 5.4)
+    // pn_len = (first_byte & 0x03) + 1, range: 1..=4
+    let pn_len = (unprotected_first_byte & 0x03) + 1;
+    debug!("Unprotected PN length: {}", pn_len);
 
     // 解密 Packet Number
+    // ⚠️ 重要：先读取 protected bytes，因为 XOR 是 in-place 的
+    let protected_pn_bytes: Vec<u8> = packet[pn_offset..pn_offset + pn_len as usize].to_vec();
+    info!("Protected PN bytes (at offset {}): {:02x?}", pn_offset, protected_pn_bytes);
+    info!("Mask for PN: {:02x?}", &mask[1..pn_len as usize + 1]);
+
     let mut pn_bytes = [0u8; 4];
     for i in 0..pn_len as usize {
         let idx = pn_offset + i;
@@ -101,10 +104,30 @@ pub fn remove_header_protection(
         packet[idx] = pn_bytes[i]; // In-place 解密
     }
 
-    // 解码 Packet Number (RFC 9000 Section 17.1)
-    let packet_number = decode_packet_number(&pn_bytes[..pn_len as usize], 0)?;
+    info!("Unprotected PN bytes: {:02x?}", &pn_bytes[..pn_len as usize]);
 
-    debug!("Packet Number decoded: {}", packet_number);
+    // 解码 Packet Number
+    //
+    // 对于我们当前场景（抓到的通常是连接早期的 Initial），直接将截断的 PN
+    // 作为数值使用即可（等价于 expected_pn=0 的标准解码结果）。
+    // 这也避免了在没有“expected_pn 状态机”的情况下错误恢复 PN。
+    let mut packet_number = 0u64;
+    for &b in pn_bytes[..pn_len as usize].iter() {
+        packet_number = (packet_number << 8) | (b as u64);
+    }
+    info!("Packet Number decoded: {}", packet_number);
+
+    // ⚠️ 对于 Initial packet，PN 通常很小（第一个包 PN=0）
+    // 但如果 PN>100，可能：
+    // 1. 客户端发送了多个 Initial packet（PN 递增）
+    // 2. 或这是一个非标准实现
+    // 我们记录警告但继续尝试解密
+    if packet_number > 100 {
+        warn!("Decoded PN {} is unusually large for Initial packet. \
+              This might be a retransmission or non-standard implementation.",
+              packet_number);
+        // 不返回错误，继续尝试解密
+    }
 
     // 更新 first byte
     packet[0] = unprotected_first_byte;

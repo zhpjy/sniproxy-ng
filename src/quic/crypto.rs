@@ -5,29 +5,31 @@
 
 use crate::quic::error::{QuicError, Result};
 use ring::hkdf::{Prk, Salt, HKDF_SHA256};
-use tracing::debug;
+use tracing::{debug, info};
 
-/// RFC 9001 Section A.3 - QUIC Version 1 Initial Salt
+/// QUIC Version 1 Initial Salt
 ///
 /// 这是用于从 DCID 派生初始密钥的 Salt 值。
-/// ⚠️ 重要: 这个值是 QUIC v1 标准规定的，不能更改！
+/// ⚠️ 重要：这个值是 QUIC v1 标准规定的，不能更改！
 pub const INITIAL_SALT_V1: &[u8] = &[
-    0xc3, 0xee, 0xf7, 0x12, 0xc7, 0xeb, 0xb6, 0xa4, 0xac, 0x6f, 0x08, 0x78, 0x11, 0x8a, 0xf1,
-    0x4b, 0x9c, 0x5d, 0x3a, 0x1a,
+    // RFC 9001: https://www.rfc-editor.org/rfc/rfc9001.html#name-initial-secrets
+    0x38, 0x76, 0x2c, 0xf7, 0xf5, 0x59, 0x34, 0xb3, 0x4d, 0x17, 0x9a, 0xe6, 0xa4, 0xc8, 0x0c,
+    0xad, 0xcc, 0xbb, 0x7f, 0x0a,
 ];
 
-/// RFC 9001 Section A.4 - QUIC Version 2 Initial Salt
+/// QUIC Version 2 Initial Salt
 ///
 /// QUIC v2 使用不同的 Salt 值进行密钥派生。
-/// ⚠️ 重要: 这个值是 QUIC v2 标准规定的，不能更改！
+/// ⚠️ 重要：这个值是 QUIC v2 标准规定的，不能更改！
 pub const INITIAL_SALT_V2: &[u8] = &[
-    0x1d, 0x32, 0xf7, 0xb5, 0xe4, 0xe4, 0xc5, 0x93, 0x5a, 0x83, 0xdf, 0x15, 0xa3, 0x33, 0x73,
-    0x12, 0x61, 0x9b, 0xc1, 0xab,
+    // QUIC v2: https://www.ietf.org/archive/id/draft-ietf-quic-v2-10.html#name-initial-salt-2
+    0x0d, 0xed, 0xe3, 0xde, 0xf7, 0x00, 0xa6, 0xdb, 0x81, 0x93, 0x81, 0xbe, 0x6e, 0x26, 0x9d,
+    0xcb, 0xf9, 0xbd, 0x2e, 0xd9,
 ];
 
 /// QUIC Initial Packet 加密密钥
 ///
-/// 包含三个密钥:
+/// 包含三个密钥：
 /// - key: 用于 AES-GCM 解密 payload
 /// - iv: 初始化向量
 /// - hp_key: 用于 header protection
@@ -41,11 +43,39 @@ pub struct InitialKeys {
     pub hp_key: Vec<u8>,
 }
 
+/// QUIC Initial keys role (client vs server)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InitialKeyRole {
+    Client,
+    Server,
+}
+
+fn label_quic_key(version: u32) -> &'static [u8] {
+    match version {
+        0x6b3343cf => b"quicv2 key",
+        _ => b"quic key",
+    }
+}
+
+fn label_quic_iv(version: u32) -> &'static [u8] {
+    match version {
+        0x6b3343cf => b"quicv2 iv",
+        _ => b"quic iv",
+    }
+}
+
+fn label_quic_hp(version: u32) -> &'static [u8] {
+    match version {
+        0x6b3343cf => b"quicv2 hp",
+        _ => b"quic hp",
+    }
+}
+
 /// 从 DCID 派生 QUIC Initial Keys
 ///
 /// RFC 9001 Section 5.2: Initial Secrets
 ///
-/// 流程:
+/// 流程：
 /// 1. initial_secret = HKDF-Extract(INITIAL_SALT, DCID)
 /// 2. client_initial_secret = HKDF-Expand(initial_secret, "client in")
 /// 3. key = HKDF-Expand(client_initial_secret, "quic key", 16)
@@ -67,8 +97,21 @@ pub struct InitialKeys {
 /// assert_eq!(keys.iv.len(), 12);
 /// assert_eq!(keys.hp_key.len(), 16);
 /// ```
+#[allow(dead_code)]
 pub fn derive_initial_keys(dcid: &[u8], version: u32) -> Result<InitialKeys> {
-    debug!("Deriving initial keys from DCID: {:?} ({} bytes), version: {:#x}",
+    derive_initial_keys_for_role(dcid, version, InitialKeyRole::Client)
+}
+
+/// 从 DCID 派生 QUIC Initial Keys（可选择 client/server 方向）
+///
+/// RFC 9001: Initial keys are derived from the Destination Connection ID of the packet.
+/// The label depends on direction: "client in" vs "server in".
+pub fn derive_initial_keys_for_role(
+    dcid: &[u8],
+    version: u32,
+    role: InitialKeyRole,
+) -> Result<InitialKeys> {
+    info!("Deriving initial keys from DCID: {:?} ({} bytes), version: {:#x}",
            dcid, dcid.len(), version);
 
     // Step 1: HKDF-Extract
@@ -76,16 +119,17 @@ pub fn derive_initial_keys(dcid: &[u8], version: u32) -> Result<InitialKeys> {
     // 根据 QUIC 版本选择正确的 Salt
     let salt_bytes = match version {
         0x00000001 => {
-            debug!("Using QUIC v1 Initial Salt");
+            info!("Using QUIC v1 Initial Salt");
             INITIAL_SALT_V1
         }
-        0x709a50c4 => {
-            debug!("Using QUIC v2 Initial Salt");
+        // QUIC v2 (draft / final)
+        0x6b3343cf | 0x709a50c4 => {
+            info!("Using QUIC v2 Initial Salt");
             INITIAL_SALT_V2
         }
         _ => {
             // 未知版本，默认使用 v1 salt（向后兼容）
-            debug!("Unknown QUIC version {:#x}, defaulting to v1 salt", version);
+            info!("Unknown QUIC version {:#x}, defaulting to v1 salt", version);
             INITIAL_SALT_V1
         }
     };
@@ -95,7 +139,7 @@ pub fn derive_initial_keys(dcid: &[u8], version: u32) -> Result<InitialKeys> {
 
     debug!("Initial secret derived: {} bytes", 32);
 
-    // Step 2: HKDF-Expand-Label for "client in"
+    // Step 2: HKDF-Expand-Label for "client in" / "server in"
     // RFC 8446 Section 7.1
     // ring 的 extract() 已经返回 Prk，我们可以直接用它来 expand
     let client_initial_secret_bytes = {
@@ -107,21 +151,36 @@ pub fn derive_initial_keys(dcid: &[u8], version: u32) -> Result<InitialKeys> {
         }
 
         let mut secret = vec![0u8; 32];
-        let label = HkdfLabel::new(32, b"client in", b"");
+        let label_bytes: &[u8] = match role {
+            InitialKeyRole::Client => b"client in",
+            InitialKeyRole::Server => b"server in",
+        };
+        let label = HkdfLabel::new(32, label_bytes, b"");
         let info_bytes = label.as_bytes();
         let info_slice = info_bytes.as_slice();
 
         // 直接传递切片引用，避免临时数组
         let info_array = [info_slice];
-        let okm = initial_secret.expand(&info_array, LengthLimit(32))
-            .map_err(|e| QuicError::KeyDerivationFailed(format!("Expand 'client in': {}", e)))?;
+        let okm = initial_secret
+            .expand(&info_array, LengthLimit(32))
+            .map_err(|e| {
+                QuicError::KeyDerivationFailed(format!(
+                    "Expand '{:?}': {}",
+                    role, e
+                ))
+            })?;
 
         okm.fill(&mut secret[..])
-            .map_err(|e| QuicError::KeyDerivationFailed(format!("Fill 'client in': {}", e)))?;
+            .map_err(|e| {
+                QuicError::KeyDerivationFailed(format!(
+                    "Fill '{:?}': {}",
+                    role, e
+                ))
+            })?;
         secret
     };
 
-    debug!("Client initial secret derived");
+    debug!("Initial secret derived for role: {:?}", role);
 
     // 将 Vec<u8> 转换为 Prk
     let client_initial_secret = Prk::new_less_safe(HKDF_SHA256, &client_initial_secret_bytes);
@@ -129,7 +188,7 @@ pub fn derive_initial_keys(dcid: &[u8], version: u32) -> Result<InitialKeys> {
     // Step 3: Derive key (AES-128-GCM key = 16 bytes)
     let key = hkdf_expand_label(
         &client_initial_secret,
-        b"quic key",
+        label_quic_key(version),
         b"",
         16,
     )
@@ -140,7 +199,7 @@ pub fn derive_initial_keys(dcid: &[u8], version: u32) -> Result<InitialKeys> {
     // Step 4: Derive IV (12 bytes for QUIC)
     let iv = hkdf_expand_label(
         &client_initial_secret,
-        b"quic iv",
+        label_quic_iv(version),
         b"",
         12,
     )
@@ -151,7 +210,7 @@ pub fn derive_initial_keys(dcid: &[u8], version: u32) -> Result<InitialKeys> {
     // Step 5: Derive Header Protection key (16 bytes for AES-128-ECB)
     let hp_key = hkdf_expand_label(
         &client_initial_secret,
-        b"quic hp",
+        label_quic_hp(version),
         b"",
         16,
     )
@@ -240,7 +299,7 @@ impl HkdfLabel {
 
     /// 序列化为字节
     ///
-    /// 格式: [Length (2 bytes)][Label Length (1 byte)][Label...][Context Length (1 byte)][Context...]
+    /// 格式：[Length (2 bytes)][Label Length (1 byte)][Label...][Context Length (1 byte)][Context...]
     fn as_bytes(&self) -> Vec<u8> {
         let mut bytes = Vec::new();
 
@@ -298,7 +357,7 @@ mod tests {
         // quic_hp: 0x7a, 0xc8, 0x5c, 0x72, 0x6d, 0xa2, 0x28, 0x6e,
         //         0x7d, 0x5e, 0x4b, 0x49, 0xb1, 0x66, 0x43, 0x80,
 
-        // 注意: 由于我们没有完整的 RFC 测试向量验证，
+        // 注意：由于我们没有完整的 RFC 测试向量验证，
         // 这里只验证长度。在生产环境中应该使用完整的测试向量。
     }
 
