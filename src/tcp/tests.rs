@@ -12,7 +12,8 @@ mod integration_tests {
     fn test_config_creation() {
         let config = Config {
             server: crate::config::ServerConfig {
-                listen_addr: "127.0.0.1:8443".parse().unwrap(),
+                listen_https_addr: Some("127.0.0.1:8443".parse().unwrap()),
+                listen_http_addr: None,
                 log_level: "debug".to_string(),
                 log_format: "pretty".to_string(),
             },
@@ -23,13 +24,10 @@ mod integration_tests {
                 username: None,
                 password: None,
             },
-            rules: crate::config::RulesConfig {
-                default_backend: "127.0.0.1:1080".parse().unwrap(),
-                domain: vec![],
-            },
+            rules: crate::config::RulesConfig::default(),
         };
 
-        assert_eq!(config.server.listen_addr.port(), 8443);
+        assert_eq!(config.server.listen_https_addr.unwrap().port(), 8443);
         assert_eq!(config.socks5.addr.port(), 1080);
     }
 

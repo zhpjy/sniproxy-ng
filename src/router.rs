@@ -2,7 +2,6 @@
 ///
 /// 根据配置的白名单规则检查域名是否被允许。
 use crate::config::{Config, Socks5Config};
-use std::net::SocketAddr;
 use tracing::{debug, info};
 
 /// 路由器
@@ -90,12 +89,6 @@ impl Router {
     #[allow(dead_code)]
     pub fn socks5_config(&self) -> &Socks5Config {
         &self.config.socks5
-    }
-
-    /// 获取服务器 HTTPS 监听地址
-    #[allow(dead_code)]
-    pub fn listen_addr(&self) -> SocketAddr {
-        self.config.server.listen_https_addr.unwrap()
     }
 }
 

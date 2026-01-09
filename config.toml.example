@@ -1,8 +1,11 @@
 # sniproxy-ng 配置文件示例
 
 [server]
-# 监听地址 (TCP 和 UDP 都会监听此地址)
-listen_addr = "0.0.0.0:443"
+# HTTPS 监听地址 (TCP 和 UDP 都会监听此地址)
+listen_https_addr = "0.0.0.0:443"
+
+# HTTP 监听地址 (可选)
+# listen_http_addr = "0.0.0.0:80"
 
 # 日志级别: trace, debug, info, warn, error
 log_level = "info"

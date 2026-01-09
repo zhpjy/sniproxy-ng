@@ -10,7 +10,7 @@ pub struct Config {
     pub rules: RulesConfig,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServerConfig {
     /// HTTPS 监听地址 (例如: "0.0.0.0:443")
     pub listen_https_addr: Option<SocketAddr>,
@@ -22,36 +22,6 @@ pub struct ServerConfig {
     /// 日志格式: json, pretty
     #[serde(default = "default_log_format")]
     pub log_format: String,
-}
-
-// 自定义 deserialize 实现向后兼容
-impl<'de> serde::de::Deserialize<'de> for ServerConfig {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where
-        D: serde::de::Deserializer<'de>,
-    {
-        #[derive(serde::Deserialize)]
-        struct RawServerConfig {
-            listen_addr: Option<SocketAddr>,
-            listen_https_addr: Option<SocketAddr>,
-            listen_http_addr: Option<SocketAddr>,
-            #[serde(default = "default_log_level")]
-            log_level: String,
-            #[serde(default = "default_log_format")]
-            log_format: String,
-        }
-
-        let raw = RawServerConfig::deserialize(deserializer)?;
-        let listen_https_addr = raw.listen_https_addr.or(raw.listen_addr);
-        let listen_http_addr = raw.listen_http_addr;
-
-        Ok(ServerConfig {
-            listen_https_addr,
-            listen_http_addr,
-            log_level: raw.log_level,
-            log_format: raw.log_format,
-        })
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -126,31 +96,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_config_parsing() {
-        // 测试旧格式向后兼容
-        let toml_str = r#"
-[server]
-listen_addr = "0.0.0.0:443"
-log_level = "info"
-log_format = "pretty"
-
-[socks5]
-addr = "127.0.0.1:1080"
-timeout = 30
-max_connections = 100
-
-[rules]
-allow = ["*.google.com", "api.*.com"]
-"#;
-
-        let config: Config = toml::from_str(toml_str).unwrap();
-        assert_eq!(config.server.listen_https_addr.unwrap().port(), 443);
-        assert!(config.server.listen_http_addr.is_none());
-        assert_eq!(config.socks5.addr.port(), 1080);
-        assert_eq!(config.rules.allow.len(), 2);
-    }
-
-    #[test]
     fn test_new_config_format() {
         // 测试新格式：独立的 HTTPS/HTTP 配置
         let toml_str = r#"
@@ -213,7 +158,7 @@ addr = "127.0.0.1:1080"
     fn test_empty_rules_default() {
         let toml_str = r#"
 [server]
-listen_addr = "0.0.0.0:443"
+listen_https_addr = "0.0.0.0:443"
 
 [socks5]
 addr = "127.0.0.1:1080"
