@@ -55,7 +55,7 @@ pub async fn run(config: Config) -> AnyhowResult<()> {
 
     // 绑定 UDP socket
     let socket = Arc::new(UdpSocket::bind(&listen_addr).await?);
-    debug!("UDP socket bound to {}", listen_addr);
+    info!("UDP socket bound to {}", listen_addr);
 
     // 创建路由器
     let router = Router::new(config.clone());
