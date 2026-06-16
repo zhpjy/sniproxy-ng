@@ -31,6 +31,7 @@ pub enum QuicError {
 
     /// Packet Number 解码失败
     #[error("Packet number decoding failed: {0}")]
+    #[allow(dead_code)]
     PacketNumberError(String),
 
     /// CRYPTO Frame 解析失败

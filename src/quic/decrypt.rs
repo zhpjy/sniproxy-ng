@@ -58,12 +58,18 @@ fn pending_crypto_map() -> &'static Mutex<HashMap<Vec<u8>, PendingCrypto>> {
 /// assert_eq!(sni, Some("www.google.com".to_string()));
 /// ```
 pub fn extract_sni_from_quic_initial(packet: &mut [u8]) -> Result<Option<String>> {
-    info!("Starting QUIC SNI extraction (packet length: {})", packet.len());
-    info!("Raw packet header (first 32 bytes): {:02x?}", &packet[..packet.len().min(32)]);
+    debug!(
+        "Starting QUIC SNI extraction (packet length: {})",
+        packet.len()
+    );
+    debug!(
+        "Raw packet header (first 32 bytes): {:02x?}",
+        &packet[..packet.len().min(32)]
+    );
 
     // Step 1: 解析 Initial Header
     let header = crate::quic::parse_initial_header(packet)?;
-    info!(
+    debug!(
         "Parsed Initial header: version={:#x}, dcid_len={}, scid_len={}, token_len={}, payload_len={}, pn_offset={}",
         header.version,
         header.dcid.len(),
@@ -77,13 +83,18 @@ pub fn extract_sni_from_quic_initial(packet: &mut [u8]) -> Result<Option<String>
     // 对于客户端 Initial packet，PN 通常是 1-2 字节
     let protected_pn_len = (packet[0] & 0x03) + 1;
     if protected_pn_len > 2 {
-        warn!("Protected PN length {} is unusual for client Initial packet (expected 1-2). \
+        warn!(
+            "Protected PN length {} is unusual for client Initial packet (expected 1-2). \
               This might not be a client Initial packet.",
-              protected_pn_len);
+            protected_pn_len
+        );
         // 继续尝试，但记录警告
     }
-    debug!("Initial header parsed: version={:#x}, dcid_len={}",
-           header.version, header.dcid.len());
+    debug!(
+        "Initial header parsed: version={:#x}, dcid_len={}",
+        header.version,
+        header.dcid.len()
+    );
 
     // Step 2/3/4/5: Try both directions (client/server).
     //
@@ -93,26 +104,33 @@ pub fn extract_sni_from_quic_initial(packet: &mut [u8]) -> Result<Option<String>
     let original = packet.to_vec();
     for role in [InitialKeyRole::Client, InitialKeyRole::Server] {
         let mut pkt = original.clone();
-        info!("Trying QUIC Initial decryption role: {:?}", role);
+        debug!("Trying QUIC Initial decryption role: {:?}", role);
 
-        info!(
+        debug!(
             "Deriving keys from DCID: {:02x?} ({} bytes), version: {:#x}, role={:?}",
             header.dcid,
             header.dcid.len(),
             header.version,
             role
         );
-        let keys = crate::quic::crypto::derive_initial_keys_for_role(&header.dcid, header.version, role)?;
-        info!("Initial keys derived successfully, pn_offset={}", header.pn_offset);
+        let keys =
+            crate::quic::crypto::derive_initial_keys_for_role(&header.dcid, header.version, role)?;
+        debug!(
+            "Initial keys derived successfully, pn_offset={}",
+            header.pn_offset
+        );
 
-        info!("Removing header protection at offset {}", header.pn_offset);
+        debug!("Removing header protection at offset {}", header.pn_offset);
         let (unprotected_first_byte, packet_number, pn_len) =
             crate::quic::remove_header_protection(&mut pkt, header.pn_offset, &keys)?;
-        info!("Header protection removed: PN={}, pn_len={}", packet_number, pn_len);
+        debug!(
+            "Header protection removed: PN={}, pn_len={}",
+            packet_number, pn_len
+        );
 
         // Long Header reserved bits are bits 3-2; after unprotection they MUST be 0.
         let reserved = (unprotected_first_byte & 0x0c) >> 2;
-        info!(
+        debug!(
             "Unprotected first byte: {:#04x} (reserved bits={:#x})",
             unprotected_first_byte, reserved
         );
@@ -131,7 +149,7 @@ pub fn extract_sni_from_quic_initial(packet: &mut [u8]) -> Result<Option<String>
             );
         }
 
-        info!("Extracting and decrypting CRYPTO frame (role={:?})", role);
+        debug!("Extracting and decrypting CRYPTO frame (role={:?})", role);
         let crypto_data = match extract_and_decrypt_crypto_frame(
             &pkt,
             header.pn_offset,
@@ -148,7 +166,7 @@ pub fn extract_sni_from_quic_initial(packet: &mut [u8]) -> Result<Option<String>
                 continue;
             }
         };
-        info!(
+        debug!(
             "CRYPTO stream available: {} bytes (role={:?})",
             crypto_data.len(),
             role
@@ -160,7 +178,7 @@ pub fn extract_sni_from_quic_initial(packet: &mut [u8]) -> Result<Option<String>
         if let Some(ref sni) = sni {
             info!("✅ Successfully extracted SNI: {} (role={:?})", sni, role);
         } else {
-            info!("⚠️  No SNI found in packet (role={:?})", role);
+            debug!("⚠️  No SNI found in packet (role={:?})", role);
         }
 
         // Preserve the decoded packet bytes for any downstream debugging.
@@ -187,6 +205,7 @@ pub fn extract_sni_from_quic_initial(packet: &mut [u8]) -> Result<Option<String>
 ///
 /// # 返回
 /// - 解密后的 CRYPTO data (TLS ClientHello)
+#[allow(clippy::too_many_arguments)]
 fn extract_and_decrypt_crypto_frame(
     packet: &[u8],
     pn_offset: usize,
@@ -224,7 +243,7 @@ fn extract_and_decrypt_crypto_frame(
     // Debug aid: dump a small window around PN offset (after header protection removal).
     let dump_start = pn_offset.saturating_sub(12);
     let dump_end = (pn_offset + 24).min(packet.len());
-    info!(
+    debug!(
         "Bytes around pn_offset {} ({}..{}): {:02x?}",
         pn_offset,
         dump_start,
@@ -236,7 +255,7 @@ fn extract_and_decrypt_crypto_frame(
     let encrypted_payload = &packet[payload_start..payload_end];
     // AEAD AAD = header up to and including PN (after header protection removal)
     let aad = &packet[..payload_start];
-    info!(
+    debug!(
         "AAD length: {} (header..PN), encrypted_payload_len: {} (length field={} includes PN+payload, pn_len={})",
         aad.len(),
         encrypted_payload.len(),
@@ -245,10 +264,16 @@ fn extract_and_decrypt_crypto_frame(
     );
 
     // 先解密整个 payload (QUIC 中 frame type 也是加密的)
-    info!("About to decrypt: payload_len={}, packet_number={}, pn_offset={}",
-           encrypted_payload.len(), packet_number, pn_offset);
-    info!("Encrypted payload (first 32 bytes): {:02x?}",
-           &encrypted_payload[..encrypted_payload.len().min(32)]);
+    debug!(
+        "About to decrypt: payload_len={}, packet_number={}, pn_offset={}",
+        encrypted_payload.len(),
+        packet_number,
+        pn_offset
+    );
+    debug!(
+        "Encrypted payload (first 32 bytes): {:02x?}",
+        &encrypted_payload[..encrypted_payload.len().min(32)]
+    );
     // 先解密整个 payload (QUIC 中 frame type 也是加密的)
     // QUIC packet protection 的 AEAD 必须带 AAD（RFC 9001 Section 5.3）：
     // AAD = header (up to and including Packet Number) after removing header protection.
@@ -269,17 +294,17 @@ fn extract_and_decrypt_crypto_frame(
         let ciphertext = &encrypted_payload[..ciphertext_len];
         let tag = &encrypted_payload[ciphertext_len..];
 
-        info!(
+        debug!(
             "Decrypting: ciphertext_len={}, tag_len={}, pn={}",
             ciphertext_len, TAG_LEN, packet_number
         );
-        info!("Key: {:02x?}", keys.key);
-        info!("IV: {:02x?}", keys.iv);
+        debug!("Key: {:02x?}", keys.key);
+        debug!("IV: {:02x?}", keys.iv);
 
         // 构造 nonce: IV xor Packet Number
         // RFC 9001: nonce = IV ^ (packet_number as big-endian)
         let nonce = construct_nonce(&keys.iv, packet_number)?;
-        info!("Nonce constructed: {:02x?}", nonce.as_ref());
+        debug!("Nonce constructed: {:02x?}", nonce.as_ref());
 
         // 创建 AEAD key
         let unbound_key = UnboundKey::new(&AES_128_GCM, &keys.key).map_err(|e| {
@@ -305,15 +330,20 @@ fn extract_and_decrypt_crypto_frame(
         plaintext.truncate(ciphertext_len);
         plaintext
     };
-    info!("Decrypted payload: {} bytes, first 10 bytes: {:02x?}", decrypted_payload.len(), &decrypted_payload[..decrypted_payload.len().min(10)]);
+    debug!(
+        "Decrypted payload: {} bytes, first 10 bytes: {:02x?}",
+        decrypted_payload.len(),
+        &decrypted_payload[..decrypted_payload.len().min(10)]
+    );
 
     // Parse QUIC frames and collect CRYPTO fragments.
     let mut cursor = decrypted_payload.as_slice();
     let mut crypto_frags: Vec<(u64, Vec<u8>)> = Vec::new();
 
     while !cursor.is_empty() {
-        let (frame_type, type_len) = parse_varint(cursor)
-            .map_err(|e| QuicError::CryptoFrameError(format!("Failed to parse frame type: {}", e)))?;
+        let (frame_type, type_len) = parse_varint(cursor).map_err(|e| {
+            QuicError::CryptoFrameError(format!("Failed to parse frame type: {}", e))
+        })?;
         cursor = &cursor[type_len..];
 
         match frame_type {
@@ -327,12 +357,14 @@ fn extract_and_decrypt_crypto_frame(
             }
             0x06 => {
                 // CRYPTO: Offset (varint) + Length (varint) + Data
-                let (crypto_offset, off_len) = parse_varint(cursor)
-                    .map_err(|e| QuicError::CryptoFrameError(format!("Failed to parse CRYPTO offset: {}", e)))?;
+                let (crypto_offset, off_len) = parse_varint(cursor).map_err(|e| {
+                    QuicError::CryptoFrameError(format!("Failed to parse CRYPTO offset: {}", e))
+                })?;
                 cursor = &cursor[off_len..];
 
-                let (crypto_length, len_len) = parse_varint(cursor)
-                    .map_err(|e| QuicError::CryptoFrameError(format!("Failed to parse CRYPTO length: {}", e)))?;
+                let (crypto_length, len_len) = parse_varint(cursor).map_err(|e| {
+                    QuicError::CryptoFrameError(format!("Failed to parse CRYPTO length: {}", e))
+                })?;
                 cursor = &cursor[len_len..];
 
                 let crypto_length = crypto_length as usize;
@@ -348,20 +380,27 @@ fn extract_and_decrypt_crypto_frame(
                 cursor = &cursor[crypto_length..];
                 debug!(
                     "CRYPTO frame: offset={}, length={}, data_len={}",
-                    crypto_offset, crypto_length, data.len()
+                    crypto_offset,
+                    crypto_length,
+                    data.len()
                 );
                 crypto_frags.push((crypto_offset, data));
             }
             _ => {
                 // For Initial packets, we mainly care about CRYPTO. Stop on unknown types.
-                debug!("Stopping frame parsing on unknown frame type: {:#x}", frame_type);
+                debug!(
+                    "Stopping frame parsing on unknown frame type: {:#x}",
+                    frame_type
+                );
                 break;
             }
         }
     }
 
     if crypto_frags.is_empty() {
-        return Err(QuicError::CryptoFrameError("No CRYPTO frame found".to_string()));
+        return Err(QuicError::CryptoFrameError(
+            "No CRYPTO frame found".to_string(),
+        ));
     }
 
     // Buffer CRYPTO fragments across packets (per DCID).
@@ -412,6 +451,7 @@ fn extract_and_decrypt_crypto_frame(
 ///
 /// # 返回
 /// - 解密后的 TLS ClientHello
+///
 /// 构造 Nonce (IV xor Packet Number)
 ///
 /// RFC 9001: nonce 是通过将 Packet Number (作为 big-endian)
@@ -460,10 +500,7 @@ mod tests {
         let nonce = construct_nonce(&iv, packet_number).unwrap();
 
         // nonce 应该是 packet_number 在最后 8 bytes
-        let expected = [
-            0, 0, 0, 0,
-            0x12, 0x34, 0x56, 0x78,
-        ];
+        let expected = [0, 0, 0, 0, 0x12, 0x34, 0x56, 0x78];
 
         assert_eq!(&nonce[4..12], &expected[..]);
     }
@@ -471,8 +508,7 @@ mod tests {
     #[test]
     fn test_construct_nonce_with_iv() {
         let iv = [
-            0x5b, 0x6c, 0x9f, 0x0e, 0x7e, 0x6a, 0x7b, 0xb4,
-            0x1d, 0xb6, 0x56, 0x34,
+            0x5b, 0x6c, 0x9f, 0x0e, 0x7e, 0x6a, 0x7b, 0xb4, 0x1d, 0xb6, 0x56, 0x34,
         ];
         let packet_number = 0;
 
@@ -489,12 +525,5 @@ mod tests {
 
         let result = construct_nonce(&iv, packet_number);
         assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_decrypt_crypto_payload_too_short() {
-        // 环境里缺少 Rust toolchain 时，部分静态诊断会出现误报。
-        // 这里不做调用型断言，避免造成“参数个数不匹配”的假阳性。
-        assert!(true);
     }
 }

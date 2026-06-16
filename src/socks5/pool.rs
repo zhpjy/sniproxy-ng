@@ -2,12 +2,13 @@
 ///
 /// 复用 SOCKS5 连接以提升性能,避免频繁建立连接的开销。
 use crate::socks5::Socks5TcpStream;
-use anyhow::{Result, anyhow};
+use anyhow::{anyhow, Result};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::{Mutex, Semaphore};
-use tracing::{debug, info};
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore};
+use tracing::debug;
 
 /// 连接池配置
 #[derive(Clone)]
@@ -37,6 +38,8 @@ impl Default for PoolConfig {
 struct PooledConnection {
     /// SOCKS5 流
     stream: Socks5TcpStream,
+    /// 连接占用的并发名额，随连接一起释放
+    _permit: OwnedSemaphorePermit,
     /// 创建时间
     created_at: Instant,
     /// 最后使用时间
@@ -61,8 +64,8 @@ impl ConnectionPool {
     /// 创建新的连接池
     pub fn new(config: PoolConfig) -> Self {
         let semaphore = Arc::new(Semaphore::new(config.max_connections));
-        
-        info!(
+
+        debug!(
             "Created SOCKS5 connection pool: max_connections={}, idle_timeout={:?}",
             config.max_connections, config.idle_timeout
         );
@@ -80,7 +83,12 @@ impl ConnectionPool {
         &self,
         target: &str,
         port: u16,
-        connector: impl FnOnce(&str, u16) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Socks5TcpStream>> + Send>>,
+        connector: impl FnOnce(
+            &str,
+            u16,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<Socks5TcpStream>> + Send>,
+        >,
     ) -> Result<PooledConnectionGuard> {
         let key = format!("{}:{}", target, port);
 
@@ -93,7 +101,7 @@ impl ConnectionPool {
                 }) {
                     let conn = conns.remove(idx);
                     debug!("Reusing pooled connection to {}", key);
-                    
+
                     // 如果没有空闲连接了,移除 key
                     if conns.is_empty() {
                         idle.remove(&key);
@@ -110,9 +118,13 @@ impl ConnectionPool {
 
         // 2. 没有可用连接,创建新连接
         debug!("Creating new SOCKS5 connection to {}", key);
-        
+
         // 等待信号量(限制总连接数)
-        let _permit = self.semaphore.acquire().await
+        let permit = self
+            .semaphore
+            .clone()
+            .acquire_owned()
+            .await
             .map_err(|e| anyhow!("Failed to acquire semaphore: {}", e))?;
 
         let stream = connector(target, port).await?;
@@ -125,6 +137,7 @@ impl ConnectionPool {
 
         let conn = PooledConnection {
             stream,
+            _permit: permit,
             created_at: Instant::now(),
             last_used: Instant::now(),
             use_count: 1,
@@ -146,7 +159,10 @@ impl ConnectionPool {
 
         // 如果连接太老或空闲太久,丢弃它
         if age > self.config.max_lifetime || idle > self.config.idle_timeout {
-            debug!("Dropping expired connection to {} (age={:?}, idle={:?})", key, age, idle);
+            debug!(
+                "Dropping expired connection to {} (age={:?}, idle={:?})",
+                key, age, idle
+            );
             let mut count = self.active_count.lock().await;
             *count = count.saturating_sub(1);
             return;
@@ -155,10 +171,13 @@ impl ConnectionPool {
         // 将连接返回到池中
         let mut idle = self.idle_connections.lock().await;
         let conns = idle.entry(key.clone()).or_insert_with(Vec::new);
-        
+
         // 限制每个目标的空闲连接数(最多5个)
         if conns.len() < 5 {
-            debug!("Returning connection to {} to pool (use_count={})", key, conn.use_count);
+            debug!(
+                "Returning connection to {} to pool (use_count={})",
+                key, conn.use_count
+            );
             conns.push(conn);
         } else {
             debug!("Pool full for {}, dropping connection", key);
@@ -195,7 +214,7 @@ impl ConnectionPool {
             conns.retain(|conn| {
                 let idle_time = now.duration_since(conn.last_used);
                 let age = now.duration_since(conn.created_at);
-                
+
                 let keep = idle_time < self.config.idle_timeout && age < self.config.max_lifetime;
                 if !keep {
                     removed += 1;
@@ -208,7 +227,7 @@ impl ConnectionPool {
         });
 
         if removed > 0 {
-            info!("Cleaned up {} expired connections", removed);
+            debug!("Cleaned up {} expired connections", removed);
         }
     }
 
@@ -260,9 +279,55 @@ impl PooledConnectionGuard {
     /// 取出流的所有权，用于需要转移所有权的场景 (如 split)
     ///
     /// 注意：取出后连接不会被归还到池中
-    pub fn into_inner(mut self) -> Socks5TcpStream {
+    pub fn into_inner(mut self) -> PooledStream {
         // 取出连接，阻止 Drop 中的归还逻辑
-        self.connection.take().unwrap().stream
+        let conn = self.connection.take().unwrap();
+        PooledStream {
+            stream: conn.stream,
+            _permit: conn._permit,
+        }
+    }
+}
+
+/// 已从连接池取出的 SOCKS5 流。
+///
+/// 持有 semaphore permit，直到转发生命周期结束。
+pub struct PooledStream {
+    stream: Socks5TcpStream,
+    _permit: OwnedSemaphorePermit,
+}
+
+impl AsyncRead for PooledStream {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.stream).poll_read(cx, buf)
+    }
+}
+
+impl AsyncWrite for PooledStream {
+    fn poll_write(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        data: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        std::pin::Pin::new(&mut self.stream).poll_write(cx, data)
+    }
+
+    fn poll_flush(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.stream).poll_flush(cx)
+    }
+
+    fn poll_shutdown(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.stream).poll_shutdown(cx)
     }
 }
 
@@ -271,7 +336,7 @@ impl Drop for PooledConnectionGuard {
         if let Some(conn) = self.connection.take() {
             let pool = self.pool.clone();
             let key = self.key.clone();
-            
+
             tokio::spawn(async move {
                 pool.return_connection(key, conn).await;
             });
@@ -292,6 +357,33 @@ pub struct PoolStats {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    async fn spawn_minimal_socks5_server() -> std::net::SocketAddr {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+
+            let mut greeting = [0u8; 3];
+            stream.read_exact(&mut greeting).await.unwrap();
+            stream.write_all(&[0x05, 0x00]).await.unwrap();
+
+            let mut request = [0u8; 10];
+            stream.read_exact(&mut request).await.unwrap();
+            stream
+                .write_all(&[0x05, 0x00, 0x00, 0x01, 127, 0, 0, 1, 0x1f, 0x90])
+                .await
+                .unwrap();
+
+            tokio::time::sleep(Duration::from_secs(5)).await;
+        });
+
+        addr
+    }
 
     #[test]
     fn test_pool_config_default() {
@@ -311,8 +403,41 @@ mod tests {
 
         let pool = ConnectionPool::new(config);
         let stats = pool.stats().await;
-        
+
         assert_eq!(stats.active_connections, 0);
         assert_eq!(stats.idle_connections, 0);
+    }
+
+    #[tokio::test]
+    async fn checked_out_stream_holds_permit_until_dropped() {
+        let socks_addr = spawn_minimal_socks5_server().await;
+        let pool = ConnectionPool::new(PoolConfig {
+            max_connections: 1,
+            idle_timeout: Duration::from_secs(30),
+            max_lifetime: Duration::from_secs(120),
+            cleanup_interval: Duration::from_secs(30),
+        });
+
+        let guard = pool
+            .get_connection("example.com", 443, move |target, port| {
+                let target = target.to_string();
+                Box::pin(async move {
+                    crate::socks5::Socks5Client::new(socks_addr.to_string())
+                        .connect(&target, port)
+                        .await
+                })
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(pool.semaphore.available_permits(), 0);
+
+        let stream = guard.into_inner();
+        assert_eq!(pool.semaphore.available_permits(), 0);
+
+        drop(stream);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        assert_eq!(pool.semaphore.available_permits(), 1);
     }
 }

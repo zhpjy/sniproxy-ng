@@ -42,6 +42,7 @@ pub struct InitialHeader {
 /// let dcid = extract_dcid(&packet)?;
 /// assert_eq!(dcid.len(), 8);
 /// ```
+#[allow(dead_code)]
 pub fn extract_dcid(packet: &[u8]) -> Result<&[u8]> {
     // 首先检查是否有至少 1 字节
     if packet.is_empty() {
@@ -202,9 +203,9 @@ pub fn parse_initial_header(packet: &[u8]) -> Result<InitialHeader> {
     trace!("SCID: {:?} ({} bytes)", scid, scil);
 
     // 解析 Token Length (VarInt)
-    let (token_len, varint_len) = parse_varint(&packet[offset..])
-        .map_err(|e| QuicError::VarIntError(e.to_string()))?;
-    offset += varint_len as usize;
+    let (token_len, varint_len) =
+        parse_varint(&packet[offset..]).map_err(|e| QuicError::VarIntError(e.to_string()))?;
+    offset += varint_len;
 
     let token_len = token_len as usize; // 转换为 usize
 
@@ -221,9 +222,9 @@ pub fn parse_initial_header(packet: &[u8]) -> Result<InitialHeader> {
     offset += token_len;
 
     // 解析 Payload Length (VarInt)
-    let (payload_len, varint_len2) = parse_varint(&packet[offset..])
-        .map_err(|e| QuicError::VarIntError(e.to_string()))?;
-    offset += varint_len2 as usize;
+    let (payload_len, varint_len2) =
+        parse_varint(&packet[offset..]).map_err(|e| QuicError::VarIntError(e.to_string()))?;
+    offset += varint_len2;
 
     let payload_len = payload_len as usize; // 转换为 usize
 
@@ -258,7 +259,7 @@ pub fn parse_varint(data: &[u8]) -> std::result::Result<(u64, usize), String> {
 
     let first = data[0];
     let prefix = (first & 0xC0) >> 6; // 取最高 2 bits
-    let length = 1 << prefix;          // 1, 2, 4, or 8 bytes
+    let length = 1 << prefix; // 1, 2, 4, or 8 bytes
 
     if data.len() < length {
         return Err(format!(
@@ -297,8 +298,14 @@ pub fn parse_varint(data: &[u8]) -> std::result::Result<(u64, usize), String> {
             let b6 = data[5] as u64;
             let b7 = data[6] as u64;
             let b8 = data[7] as u64;
-            (b1 << 56) | (b2 << 48) | (b3 << 40) | (b4 << 32)
-                | (b5 << 24) | (b6 << 16) | (b7 << 8) | b8
+            (b1 << 56)
+                | (b2 << 48)
+                | (b3 << 40)
+                | (b4 << 32)
+                | (b5 << 24)
+                | (b6 << 16)
+                | (b7 << 8)
+                | b8
         }
         _ => unreachable!(),
     };
@@ -315,14 +322,14 @@ mod tests {
         // 构造一个简单的 QUIC Initial packet
         // Format: [First Byte][Version (4)][DCID Len][DCID][SCID Len][SCID][Token Len][Token][Payload Len][PN+Payload]
         let packet = [
-            0xC0,       // Initial packet (Long Header, Type=0b00)
+            0xC0, // Initial packet (Long Header, Type=0b00)
             0x00, 0x00, 0x00, 0x01, // Version 1
-            0x08,       // DCID Length = 8
+            0x08, // DCID Length = 8
             0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, // DCID
-            0x08,       // SCID Length = 8
+            0x08, // SCID Length = 8
             0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, // SCID
-            0x00,       // Token Length = 0
-            0x05,       // Payload Length = 5
+            0x00, // Token Length = 0
+            0x05, // Payload Length = 5
             0x00, 0x01, 0x02, 0x03, 0x04, // PN + Payload (示例)
         ];
 
@@ -378,14 +385,14 @@ mod tests {
     #[test]
     fn test_parse_initial_header() {
         let packet = [
-            0xC0,       // Initial packet
+            0xC0, // Initial packet
             0x00, 0x00, 0x00, 0x01, // Version 1
-            0x08,       // DCID Length = 8
+            0x08, // DCID Length = 8
             0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, // DCID
-            0x08,       // SCID Length = 8
+            0x08, // SCID Length = 8
             0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, // SCID
-            0x00,       // Token Length = 0
-            0x05,       // Payload Length = 5
+            0x00, // Token Length = 0
+            0x05, // Payload Length = 5
             0x00, 0x01, 0x02, 0x03, 0x04, // PN + Payload
         ];
 
@@ -402,13 +409,13 @@ mod tests {
     #[test]
     fn test_unsupported_version() {
         let packet = [
-            0xC0,       // Initial packet
+            0xC0, // Initial packet
             0xFF, 0xFF, 0xFF, 0xFF, // Invalid version
-            0x08,       // DCID Length = 8
+            0x08, // DCID Length = 8
             0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, // DCID
-            0x00,       // SCID Length = 0
-            0x00,       // Token Length = 0
-            0x00,       // Payload Length = 0
+            0x00, // SCID Length = 0
+            0x00, // Token Length = 0
+            0x00, // Payload Length = 0
         ];
 
         let result = parse_initial_header(&packet);

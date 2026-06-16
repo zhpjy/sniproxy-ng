@@ -3,18 +3,18 @@
 //! 为每个 QUIC 连接 (DCID) 维护独立的 SOCKS5 UDP relay 会话。
 
 use crate::config::Socks5Config;
+use crate::quic::decrypt::extract_sni_from_quic_initial;
 use crate::router::Router;
 use crate::socks5::udp::Socks5UdpClient;
-use crate::quic::decrypt::extract_sni_from_quic_initial;
-use anyhow::{Result, anyhow};
+use anyhow::{anyhow, Result};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::net::UdpSocket;
-use tokio::sync::Mutex;
-use tracing::{info, debug, warn};
 use tokio::sync::mpsc;
+use tokio::sync::Mutex;
+use tracing::{debug, info, warn};
 
 /// 会话配置
 #[derive(Clone)]
@@ -87,7 +87,7 @@ impl QuicSessionManager {
         socks5_config: Socks5Config,
         socket: Arc<UdpSocket>,
     ) -> Self {
-        info!(
+        debug!(
             "Created QUIC session manager: idle_timeout={:?}, cleanup_interval={:?}",
             config.idle_timeout, config.cleanup_interval
         );
@@ -143,11 +143,7 @@ impl QuicSessionManager {
     }
 
     /// 创建新会话并转发
-    async fn create_and_forward_session(
-        &self,
-        packet: &[u8],
-        src: SocketAddr,
-    ) -> Result<bool> {
+    async fn create_and_forward_session(&self, packet: &[u8], src: SocketAddr) -> Result<bool> {
         // 仅处理 QUIC Initial。不是 Initial 直接忽略。
         let header = match crate::quic::parse_initial_header(packet) {
             Ok(h) => h,
@@ -168,13 +164,19 @@ impl QuicSessionManager {
             }
         };
 
-        info!("New QUIC session request: DCID={:?}, SNI={}, client={}", dcid, sni, src);
+        info!(
+            "New QUIC session request: DCID={:?}, SNI={}, client={}",
+            dcid, sni, src
+        );
 
         // 白名单检查
         {
             let inner = self.inner.lock().await;
             if !inner.router.is_allowed(&sni) {
-                warn!("Domain {} not in whitelist, rejecting QUIC session from {}", sni, src);
+                warn!(
+                    "Domain {} not in whitelist, rejecting QUIC session from {}",
+                    sni, src
+                );
                 return Ok(false);
             }
         }
@@ -196,8 +198,10 @@ impl QuicSessionManager {
             {
                 Socks5UdpClient::new(inner.socks5_config.addr.to_string())
                     .with_auth(username.clone(), password.clone())
+                    .with_timeout(Duration::from_secs(inner.socks5_config.timeout))
             } else {
                 Socks5UdpClient::new(inner.socks5_config.addr.to_string())
+                    .with_timeout(Duration::from_secs(inner.socks5_config.timeout))
             };
 
             let (relay, relay_addr) = udp_client.associate().await?;
@@ -283,12 +287,13 @@ impl QuicSessionManager {
         let initial_count = inner.sessions.len();
         let idle_timeout = inner.config.idle_timeout;
 
-        inner.sessions
+        inner
+            .sessions
             .retain(|_, session| now.duration_since(session.last_active) < idle_timeout);
 
         let removed = initial_count - inner.sessions.len();
         if removed > 0 {
-            info!("Cleaned up {} expired QUIC sessions", removed);
+            debug!("Cleaned up {} expired QUIC sessions", removed);
         }
 
         removed

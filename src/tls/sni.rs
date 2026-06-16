@@ -1,4 +1,4 @@
-use anyhow::{Result, bail};
+use anyhow::{bail, Result};
 use std::fmt;
 
 /// TLS SNI 提取错误类型
@@ -58,7 +58,8 @@ pub fn extract_sni(data: &[u8]) -> Result<Option<String>> {
         bail!(SniError::NotHandshake);
     }
 
-    let hs_len = ((payload[1] as usize) << 16) | ((payload[2] as usize) << 8) | (payload[3] as usize);
+    let hs_len =
+        ((payload[1] as usize) << 16) | ((payload[2] as usize) << 8) | (payload[3] as usize);
     if payload.len() < 4 + hs_len {
         bail!(SniError::DataTooShort);
     }
@@ -82,10 +83,8 @@ pub fn extract_sni(data: &[u8]) -> Result<Option<String>> {
         return Ok(None);
     }
 
-    let cipher_suites_length = u16::from_be_bytes([
-        client_hello[offset],
-        client_hello[offset + 1],
-    ]) as usize;
+    let cipher_suites_length =
+        u16::from_be_bytes([client_hello[offset], client_hello[offset + 1]]) as usize;
     offset += 2 + cipher_suites_length;
 
     if offset >= client_hello.len() {
@@ -99,10 +98,8 @@ pub fn extract_sni(data: &[u8]) -> Result<Option<String>> {
         return Ok(None);
     }
 
-    let extensions_length = u16::from_be_bytes([
-        client_hello[offset],
-        client_hello[offset + 1],
-    ]) as usize;
+    let extensions_length =
+        u16::from_be_bytes([client_hello[offset], client_hello[offset + 1]]) as usize;
     offset += 2;
 
     if offset + extensions_length > client_hello.len() {
@@ -117,14 +114,9 @@ pub fn extract_sni(data: &[u8]) -> Result<Option<String>> {
             break;
         }
 
-        let ext_type = u16::from_be_bytes([
-            client_hello[offset],
-            client_hello[offset + 1],
-        ]);
-        let ext_length = u16::from_be_bytes([
-            client_hello[offset + 2],
-            client_hello[offset + 3],
-        ]) as usize;
+        let ext_type = u16::from_be_bytes([client_hello[offset], client_hello[offset + 1]]);
+        let ext_length =
+            u16::from_be_bytes([client_hello[offset + 2], client_hello[offset + 3]]) as usize;
         offset += 4;
 
         ext_count += 1;
@@ -177,8 +169,8 @@ fn parse_sni_extension(data: &[u8]) -> Result<String> {
 
     let hostname_bytes = &data[offset..offset + name_length];
 
-    let hostname = String::from_utf8(hostname_bytes.to_vec())
-        .map_err(|_| SniError::InvalidHostname)?;
+    let hostname =
+        String::from_utf8(hostname_bytes.to_vec()).map_err(|_| SniError::InvalidHostname)?;
 
     if !is_valid_hostname(&hostname) {
         bail!(SniError::InvalidHostname);
@@ -193,9 +185,9 @@ fn is_valid_hostname(hostname: &str) -> bool {
         return false;
     }
 
-    hostname.chars().all(|c| {
-        c.is_alphanumeric() || c == '.' || c == '-'
-    })
+    hostname
+        .chars()
+        .all(|c| c.is_alphanumeric() || c == '.' || c == '-')
 }
 
 #[cfg(test)]
@@ -210,12 +202,15 @@ mod tests {
         // TLS Record Header
         data.extend_from_slice(&[0x16, 0x03, 0x01]); // Type, Version
         let record_len_pos = data.len();
-        data.push(0); data.push(0); // Length placeholder
+        data.push(0);
+        data.push(0); // Length placeholder
 
         // Handshake Message
         data.push(0x01); // Type: ClientHello
         let hs_len_pos = data.len();
-        data.push(0); data.push(0); data.push(0); // Length placeholder
+        data.push(0);
+        data.push(0);
+        data.push(0); // Length placeholder
 
         // ClientHello Body
         data.extend_from_slice(&[0x03, 0x03]); // TLS 1.2
@@ -238,17 +233,20 @@ mod tests {
 
         // Extensions
         let ext_start = data.len();
-        data.push(0); data.push(0); // Length placeholder
+        data.push(0);
+        data.push(0); // Length placeholder
 
         // SNI Extension
         data.extend_from_slice(&[0x00, 0x00]); // Type: server_name
 
         let sni_ext_start = data.len();
-        data.push(0); data.push(0); // Length placeholder
+        data.push(0);
+        data.push(0); // Length placeholder
 
         // Server Name List
         let sni_list_start = data.len();
-        data.push(0); data.push(0); // Length placeholder
+        data.push(0);
+        data.push(0); // Length placeholder
 
         // Server Name
         data.push(0x00); // Type: hostname
@@ -297,16 +295,21 @@ mod tests {
         // TLS Record
         data.extend_from_slice(&[0x16, 0x03, 0x01]);
         let rec_pos = data.len();
-        data.push(0); data.push(0);
+        data.push(0);
+        data.push(0);
 
         // Handshake
         data.push(0x01);
         let hs_pos = data.len();
-        data.push(0); data.push(0); data.push(0);
+        data.push(0);
+        data.push(0);
+        data.push(0);
 
         // ClientHello
         data.extend_from_slice(&[0x03, 0x03]);
-        for i in 0u8..32 { data.push(i); }
+        for i in 0u8..32 {
+            data.push(i);
+        }
         data.push(0x00);
         data.extend_from_slice(&[0x00, 0x02, 0x00, 0x2F]);
         data.extend_from_slice(&[0x01, 0x00]);

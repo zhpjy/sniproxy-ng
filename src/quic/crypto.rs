@@ -5,7 +5,7 @@
 
 use crate::quic::error::{QuicError, Result};
 use ring::hkdf::{Prk, Salt, HKDF_SHA256};
-use tracing::{debug, info};
+use tracing::debug;
 
 /// QUIC Version 1 Initial Salt
 ///
@@ -13,8 +13,8 @@ use tracing::{debug, info};
 /// ⚠️ 重要：这个值是 QUIC v1 标准规定的，不能更改！
 pub const INITIAL_SALT_V1: &[u8] = &[
     // RFC 9001: https://www.rfc-editor.org/rfc/rfc9001.html#name-initial-secrets
-    0x38, 0x76, 0x2c, 0xf7, 0xf5, 0x59, 0x34, 0xb3, 0x4d, 0x17, 0x9a, 0xe6, 0xa4, 0xc8, 0x0c,
-    0xad, 0xcc, 0xbb, 0x7f, 0x0a,
+    0x38, 0x76, 0x2c, 0xf7, 0xf5, 0x59, 0x34, 0xb3, 0x4d, 0x17, 0x9a, 0xe6, 0xa4, 0xc8, 0x0c, 0xad,
+    0xcc, 0xbb, 0x7f, 0x0a,
 ];
 
 /// QUIC Version 2 Initial Salt
@@ -23,8 +23,8 @@ pub const INITIAL_SALT_V1: &[u8] = &[
 /// ⚠️ 重要：这个值是 QUIC v2 标准规定的，不能更改！
 pub const INITIAL_SALT_V2: &[u8] = &[
     // QUIC v2: https://www.ietf.org/archive/id/draft-ietf-quic-v2-10.html#name-initial-salt-2
-    0x0d, 0xed, 0xe3, 0xde, 0xf7, 0x00, 0xa6, 0xdb, 0x81, 0x93, 0x81, 0xbe, 0x6e, 0x26, 0x9d,
-    0xcb, 0xf9, 0xbd, 0x2e, 0xd9,
+    0x0d, 0xed, 0xe3, 0xde, 0xf7, 0x00, 0xa6, 0xdb, 0x81, 0x93, 0x81, 0xbe, 0x6e, 0x26, 0x9d, 0xcb,
+    0xf9, 0xbd, 0x2e, 0xd9,
 ];
 
 /// QUIC Initial Packet 加密密钥
@@ -111,25 +111,29 @@ pub fn derive_initial_keys_for_role(
     version: u32,
     role: InitialKeyRole,
 ) -> Result<InitialKeys> {
-    info!("Deriving initial keys from DCID: {:?} ({} bytes), version: {:#x}",
-           dcid, dcid.len(), version);
+    debug!(
+        "Deriving initial keys from DCID: {:?} ({} bytes), version: {:#x}",
+        dcid,
+        dcid.len(),
+        version
+    );
 
     // Step 1: HKDF-Extract
     // RFC 9001: initial_secret = HKDF-Extract(salt, dcid)
     // 根据 QUIC 版本选择正确的 Salt
     let salt_bytes = match version {
         0x00000001 => {
-            info!("Using QUIC v1 Initial Salt");
+            debug!("Using QUIC v1 Initial Salt");
             INITIAL_SALT_V1
         }
         // QUIC v2 (draft / final)
         0x6b3343cf | 0x709a50c4 => {
-            info!("Using QUIC v2 Initial Salt");
+            debug!("Using QUIC v2 Initial Salt");
             INITIAL_SALT_V2
         }
         _ => {
             // 未知版本，默认使用 v1 salt（向后兼容）
-            info!("Unknown QUIC version {:#x}, defaulting to v1 salt", version);
+            debug!("Unknown QUIC version {:#x}, defaulting to v1 salt", version);
             INITIAL_SALT_V1
         }
     };
@@ -163,20 +167,10 @@ pub fn derive_initial_keys_for_role(
         let info_array = [info_slice];
         let okm = initial_secret
             .expand(&info_array, LengthLimit(32))
-            .map_err(|e| {
-                QuicError::KeyDerivationFailed(format!(
-                    "Expand '{:?}': {}",
-                    role, e
-                ))
-            })?;
+            .map_err(|e| QuicError::KeyDerivationFailed(format!("Expand '{:?}': {}", role, e)))?;
 
         okm.fill(&mut secret[..])
-            .map_err(|e| {
-                QuicError::KeyDerivationFailed(format!(
-                    "Fill '{:?}': {}",
-                    role, e
-                ))
-            })?;
+            .map_err(|e| QuicError::KeyDerivationFailed(format!("Fill '{:?}': {}", role, e)))?;
         secret
     };
 
@@ -186,35 +180,20 @@ pub fn derive_initial_keys_for_role(
     let client_initial_secret = Prk::new_less_safe(HKDF_SHA256, &client_initial_secret_bytes);
 
     // Step 3: Derive key (AES-128-GCM key = 16 bytes)
-    let key = hkdf_expand_label(
-        &client_initial_secret,
-        label_quic_key(version),
-        b"",
-        16,
-    )
-    .map_err(|e| QuicError::KeyDerivationFailed(format!("HKDF-Expand 'quic key': {}", e)))?;
+    let key = hkdf_expand_label(&client_initial_secret, label_quic_key(version), b"", 16)
+        .map_err(|e| QuicError::KeyDerivationFailed(format!("HKDF-Expand 'quic key': {}", e)))?;
 
     debug!("AEAD key derived: {} bytes", key.len());
 
     // Step 4: Derive IV (12 bytes for QUIC)
-    let iv = hkdf_expand_label(
-        &client_initial_secret,
-        label_quic_iv(version),
-        b"",
-        12,
-    )
-    .map_err(|e| QuicError::KeyDerivationFailed(format!("HKDF-Expand 'quic iv': {}", e)))?;
+    let iv = hkdf_expand_label(&client_initial_secret, label_quic_iv(version), b"", 12)
+        .map_err(|e| QuicError::KeyDerivationFailed(format!("HKDF-Expand 'quic iv': {}", e)))?;
 
     debug!("IV derived: {} bytes", iv.len());
 
     // Step 5: Derive Header Protection key (16 bytes for AES-128-ECB)
-    let hp_key = hkdf_expand_label(
-        &client_initial_secret,
-        label_quic_hp(version),
-        b"",
-        16,
-    )
-    .map_err(|e| QuicError::KeyDerivationFailed(format!("HKDF-Expand 'quic hp': {}", e)))?;
+    let hp_key = hkdf_expand_label(&client_initial_secret, label_quic_hp(version), b"", 16)
+        .map_err(|e| QuicError::KeyDerivationFailed(format!("HKDF-Expand 'quic hp': {}", e)))?;
 
     debug!("HP key derived: {} bytes", hp_key.len());
 
@@ -332,9 +311,7 @@ mod tests {
     /// 期望输出 client_initial_secret: 0x2d... (32 bytes)
     #[test]
     fn test_rfc9001_test_vector_1() {
-        let dcid = [
-            0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08,
-        ];
+        let dcid = [0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08];
 
         let keys = derive_initial_keys(&dcid, 0x00000001).expect("Failed to derive keys");
 

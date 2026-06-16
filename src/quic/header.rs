@@ -6,7 +6,7 @@
 use crate::quic::crypto::InitialKeys;
 use crate::quic::error::{QuicError, Result};
 use ring::aead::quic::{HeaderProtectionKey, AES_128};
-use tracing::{debug, info, warn};
+use tracing::{debug, warn};
 
 /// 移除 QUIC Initial Packet 的 Header Protection
 ///
@@ -45,7 +45,7 @@ pub fn remove_header_protection(
     // 正确流程：先用 sample 生成 mask → 解除 first byte 保护 → 再从 unprotected first byte 读取 PN length。
     let protected_first_byte = packet[0];
     let protected_pn_len = (protected_first_byte & 0x03) + 1;
-    info!(
+    debug!(
         "Protected first byte: {:#04x}, protected_pn_len(UNRELIABLE): {}",
         protected_first_byte, protected_pn_len
     );
@@ -63,18 +63,22 @@ pub fn remove_header_protection(
     }
 
     let sample = &packet[sample_start..sample_end];
-    info!("Sample: start={}, end={}, first 16 bytes: {:02x?}",
-           sample_start, sample_end, sample);
+    debug!(
+        "Sample: start={}, end={}, first 16 bytes: {:02x?}",
+        sample_start, sample_end, sample
+    );
 
     // 创建 Header Protection Key
-    let hp_key = HeaderProtectionKey::new(&AES_128, &keys.hp_key)
-        .map_err(|e| QuicError::HeaderProtectionFailed(format!("Failed to create HP key: {:?}", e)))?;
+    let hp_key = HeaderProtectionKey::new(&AES_128, &keys.hp_key).map_err(|e| {
+        QuicError::HeaderProtectionFailed(format!("Failed to create HP key: {:?}", e))
+    })?;
 
     // 生成 mask
-    let mask = hp_key.new_mask(sample)
-        .map_err(|e| QuicError::HeaderProtectionFailed(format!("Failed to generate mask: {:?}", e)))?;
+    let mask = hp_key.new_mask(sample).map_err(|e| {
+        QuicError::HeaderProtectionFailed(format!("Failed to generate mask: {:?}", e))
+    })?;
 
-    info!("Mask generated: {:02x?}", mask);
+    debug!("Mask generated: {:02x?}", mask);
 
     // 解密 first byte
     // 只需要修改低 4 bits (packet number length)
@@ -94,8 +98,11 @@ pub fn remove_header_protection(
     // 解密 Packet Number
     // ⚠️ 重要：先读取 protected bytes，因为 XOR 是 in-place 的
     let protected_pn_bytes: Vec<u8> = packet[pn_offset..pn_offset + pn_len as usize].to_vec();
-    info!("Protected PN bytes (at offset {}): {:02x?}", pn_offset, protected_pn_bytes);
-    info!("Mask for PN: {:02x?}", &mask[1..pn_len as usize + 1]);
+    debug!(
+        "Protected PN bytes (at offset {}): {:02x?}",
+        pn_offset, protected_pn_bytes
+    );
+    debug!("Mask for PN: {:02x?}", &mask[1..pn_len as usize + 1]);
 
     let mut pn_bytes = [0u8; 4];
     for i in 0..pn_len as usize {
@@ -104,7 +111,10 @@ pub fn remove_header_protection(
         packet[idx] = pn_bytes[i]; // In-place 解密
     }
 
-    info!("Unprotected PN bytes: {:02x?}", &pn_bytes[..pn_len as usize]);
+    debug!(
+        "Unprotected PN bytes: {:02x?}",
+        &pn_bytes[..pn_len as usize]
+    );
 
     // 解码 Packet Number
     //
@@ -115,7 +125,7 @@ pub fn remove_header_protection(
     for &b in pn_bytes[..pn_len as usize].iter() {
         packet_number = (packet_number << 8) | (b as u64);
     }
-    info!("Packet Number decoded: {}", packet_number);
+    debug!("Packet Number decoded: {}", packet_number);
 
     // ⚠️ 对于 Initial packet，PN 通常很小（第一个包 PN=0）
     // 但如果 PN>100，可能：
@@ -123,9 +133,11 @@ pub fn remove_header_protection(
     // 2. 或这是一个非标准实现
     // 我们记录警告但继续尝试解密
     if packet_number > 100 {
-        warn!("Decoded PN {} is unusually large for Initial packet. \
+        warn!(
+            "Decoded PN {} is unusually large for Initial packet. \
               This might be a retransmission or non-standard implementation.",
-              packet_number);
+            packet_number
+        );
         // 不返回错误，继续尝试解密
     }
 
@@ -162,6 +174,7 @@ pub fn remove_header_protection(
 /// else:
 ///     return candidate + pn_win
 /// ```
+#[allow(dead_code)]
 pub fn decode_packet_number(truncated_pn: &[u8], expected_pn: u64) -> Result<u64> {
     let pn_len = truncated_pn.len();
 
@@ -174,7 +187,7 @@ pub fn decode_packet_number(truncated_pn: &[u8], expected_pn: u64) -> Result<u64
 
     // 将截断的 PN 转换为整数
     let mut truncated = 0u64;
-    for (_i, &byte) in truncated_pn.iter().enumerate() {
+    for &byte in truncated_pn {
         truncated = (truncated << 8) | (byte as u64);
     }
 
@@ -187,15 +200,14 @@ pub fn decode_packet_number(truncated_pn: &[u8], expected_pn: u64) -> Result<u64
     let candidate = (expected_pn & !mask) | truncated;
 
     // 选择最接近 expected_pn 的值
-    let decoded = if candidate <= expected_pn + pn_hwin
-        && candidate + pn_win > expected_pn + pn_hwin
-    {
-        candidate
-    } else if candidate > expected_pn + pn_hwin {
-        candidate.saturating_sub(pn_win)
-    } else {
-        candidate + pn_win
-    };
+    let decoded =
+        if candidate <= expected_pn + pn_hwin && candidate + pn_win > expected_pn + pn_hwin {
+            candidate
+        } else if candidate > expected_pn + pn_hwin {
+            candidate.saturating_sub(pn_win)
+        } else {
+            candidate + pn_win
+        };
 
     debug!(
         "PN decode: truncated={}, expected={}, decoded={}",

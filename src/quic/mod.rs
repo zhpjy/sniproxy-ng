@@ -4,10 +4,10 @@
 //!
 //! # 架构
 //!
-//! - [`parser`]: QUIC Initial Packet 解析 (提取 DCID, Version 等)
-//! - [`crypto`]: 密钥派生 (HKDF) 和解密 (AES-GCM)
-//! - [`error`]: 错误类型定义
-//! - [`session`]: QUIC 会话管理 (DCID → SOCKS5 UDP relay)
+//! - [`parser`][]: QUIC Initial Packet 解析 (提取 DCID, Version 等)
+//! - [`crypto`][]: 密钥派生 (HKDF) 和解密 (AES-GCM)
+//! - [`error`][]: 错误类型定义
+//! - [`session`][]: QUIC 会话管理 (DCID → SOCKS5 UDP relay)
 //!
 //! # 使用流程
 //!
@@ -23,42 +23,39 @@
 //! - 仅支持 QUIC v1 (0x00000001)
 //! - 每个会话独立维护，不跨 Initial packets 处理分片
 
-pub mod error;
-pub mod parser;
 pub mod crypto;
-pub mod header;
 pub mod decrypt;
+pub mod error;
+pub mod header;
+pub mod parser;
 pub mod session;
 
-pub use parser::parse_initial_header;
-pub use crypto::derive_initial_keys;
 pub use header::remove_header_protection;
-pub use decrypt::extract_sni_from_quic_initial;
+pub use parser::parse_initial_header;
 
 use crate::config::Config;
 use crate::router::Router;
 use anyhow::Result as AnyhowResult;
-use tracing::{info, warn, debug};
-use tokio::net::UdpSocket;
 use std::sync::Arc;
+use tokio::net::UdpSocket;
+use tracing::{debug, info, warn};
 
 /// 运行 QUIC/HTTP3 代理服务器
 ///
 /// 接收 UDP packets，提取 SNI，管理会话，通过 SOCKS5 UDP relay 转发流量
 pub async fn run(config: Config) -> AnyhowResult<()> {
-    let listen_addr = config.server.listen_https_addr
+    let listen_addr = config
+        .server
+        .listen_https_addr
         .ok_or_else(|| anyhow::anyhow!("HTTPS listen address not configured"))?;
 
-    info!(
-        "Starting QUIC/HTTP3 proxy server on {}",
-        listen_addr
-    );
-    info!("QUIC SNI extraction module loaded");
-    info!("Waiting for QUIC Initial packets...");
+    info!("Starting QUIC/HTTP3 proxy server on {}", listen_addr);
+    debug!("QUIC SNI extraction module loaded");
+    debug!("Waiting for QUIC Initial packets...");
 
     // 绑定 UDP socket
     let socket = Arc::new(UdpSocket::bind(&listen_addr).await?);
-    info!("UDP socket bound to {}", listen_addr);
+    debug!("UDP socket bound to {}", listen_addr);
 
     // 创建路由器
     let router = Router::new(config.clone());
@@ -101,24 +98,5 @@ pub async fn run(config: Config) -> AnyhowResult<()> {
                 warn!("Failed to handle packet from {}: {}", src_addr, e);
             }
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_module_exports() {
-        // 确保所有公共 API 都可以正常导入
-        use crate::quic::{
-            crypto::derive_initial_keys,
-            error::QuicError,
-            parser::extract_dcid,
-            session::{QuicSession, QuicSessionManager, QuicSessionConfig},
-        };
-
-        // 这个测试只是检查编译，不实际运行
-        assert!(true, "Module exports work");
     }
 }

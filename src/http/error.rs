@@ -7,6 +7,7 @@ use thiserror::Error;
 pub enum HttpError {
     /// 无效的 HTTP 请求
     #[error("Invalid HTTP request: {0}")]
+    #[allow(dead_code)]
     InvalidRequest(String),
 
     /// Host 头未找到
@@ -19,11 +20,10 @@ pub enum HttpError {
 
     /// 域名不被允许
     #[error("Domain not allowed: {0}")]
+    #[allow(dead_code)]
     DomainNotAllowed(String),
 
     /// UTF-8 解码错误
     #[error("UTF-8 error: {0}")]
     Utf8Error(#[from] std::str::Utf8Error),
 }
-
-pub type Result<T> = std::result::Result<T, HttpError>;

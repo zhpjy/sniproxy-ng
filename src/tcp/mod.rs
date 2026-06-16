@@ -1,22 +1,33 @@
 use crate::config::Config;
-use crate::socks5::{Socks5Client, ConnectionPool, PoolConfig};
-use crate::tls::sni::extract_sni;
 use crate::router::Router;
-use anyhow::{Result, anyhow, bail};
+use crate::socks5::{ConnectionPool, PoolConfig, Socks5Client};
+use crate::tls::sni::extract_sni;
+use anyhow::{anyhow, bail, Result};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tracing::{info, debug, error, warn};
+use tracing::{debug, error, info, warn};
+
+#[derive(Clone)]
+struct Socks5Runtime {
+    addr: String,
+    username: Option<String>,
+    password: Option<String>,
+    timeout: Duration,
+}
 
 /// 运行 TCP 代理服务器 (HTTP/1.1 + TLS)
 pub async fn run(config: Config) -> Result<()> {
-    let listen_addr = config.server.listen_https_addr
+    let listen_addr = config
+        .server
+        .listen_https_addr
         .ok_or_else(|| anyhow!("HTTPS listen address not configured"))?;
 
     info!("Starting TCP proxy server on {}", listen_addr);
 
     let listener = TcpListener::bind(&listen_addr).await?;
-    info!("TCP proxy server listening on {}", listen_addr);
+    debug!("TCP proxy server listening on {}", listen_addr);
 
     // 创建路由器
     let router = Arc::new(Router::new(config.clone()));
@@ -27,33 +38,31 @@ pub async fn run(config: Config) -> Result<()> {
         ..Default::default()
     };
     let pool = Arc::new(ConnectionPool::new(pool_config));
-    info!("SOCKS5 connection pool created");
+    debug!("SOCKS5 connection pool created");
 
     // 启动连接池清理任务
     pool.clone().spawn_cleanup_task();
-    info!("TCP connection pool cleanup task started");
+    debug!("TCP connection pool cleanup task started");
 
     loop {
         match listener.accept().await {
             Ok((client_stream, client_addr)) => {
-                info!("Accepted connection from {}", client_addr);
+                debug!("Accepted connection from {}", client_addr);
 
                 // 克隆以供任务使用
                 let router_clone = router.clone();
                 let pool_clone = pool.clone();
-                let socks5_addr = config.socks5.addr.to_string();
-                let socks5_username = config.socks5.username.clone();
-                let socks5_password = config.socks5.password.clone();
+                let socks5 = Socks5Runtime {
+                    addr: config.socks5.addr.to_string(),
+                    username: config.socks5.username.clone(),
+                    password: config.socks5.password.clone(),
+                    timeout: Duration::from_secs(config.socks5.timeout),
+                };
                 tokio::spawn(async move {
-                    if let Err(e) = handle_client(
-                        client_stream,
-                        client_addr,
-                        router_clone,
-                        pool_clone,
-                        socks5_addr,
-                        socks5_username,
-                        socks5_password,
-                    ).await {
+                    if let Err(e) =
+                        handle_client(client_stream, client_addr, router_clone, pool_clone, socks5)
+                            .await
+                    {
                         error!("Error handling client {}: {}", client_addr, e);
                     }
                 });
@@ -71,9 +80,7 @@ async fn handle_client(
     client_addr: std::net::SocketAddr,
     router: Arc<Router>,
     pool: Arc<ConnectionPool>,
-    socks5_addr: String,
-    socks5_username: Option<String>,
-    socks5_password: Option<String>,
+    socks5: Socks5Runtime,
 ) -> Result<()> {
     debug!("Handling client {}", client_addr);
 
@@ -81,7 +88,14 @@ async fn handle_client(
     // 我们需要读取足够的数据来捕获 TLS ClientHello
     let mut buffer = vec![0u8; 4096];
     let mut client_stream = client_stream;
-    let n = client_stream.peek(&mut buffer).await?;
+    let n = tokio::time::timeout(socks5.timeout, client_stream.peek(&mut buffer))
+        .await
+        .map_err(|_| {
+            anyhow!(
+                "Timed out waiting for initial TLS data from {}",
+                client_addr
+            )
+        })??;
 
     if n == 0 {
         warn!("Client {} closed connection immediately", client_addr);
@@ -91,7 +105,7 @@ async fn handle_client(
     // 2. 尝试提取 SNI
     let sni = match extract_sni(&buffer[..n])? {
         Some(hostname) => {
-            info!("Extracted SNI: {} from {}", hostname, client_addr);
+            debug!("Extracted SNI: {} from {}", hostname, client_addr);
             hostname
         }
         None => {
@@ -100,21 +114,31 @@ async fn handle_client(
 
             // 检查是否是 HTTP 明文请求
             if let Ok(http_data) = std::str::from_utf8(&buffer[..n]) {
-                if http_data.starts_with("GET ") || http_data.starts_with("POST ") ||
-                   http_data.starts_with("HEAD ") || http_data.starts_with("PUT ") ||
-                   http_data.starts_with("DELETE ") || http_data.starts_with("OPTIONS ") ||
-                   http_data.starts_with("CONNECT ") {
+                if http_data.starts_with("GET ")
+                    || http_data.starts_with("POST ")
+                    || http_data.starts_with("HEAD ")
+                    || http_data.starts_with("PUT ")
+                    || http_data.starts_with("DELETE ")
+                    || http_data.starts_with("OPTIONS ")
+                    || http_data.starts_with("CONNECT ")
+                {
                     bail!("HTTP plaintext requests not supported from {}", client_addr);
                 }
             }
 
-            bail!("No SNI found and cannot determine target from {}", client_addr);
+            bail!(
+                "No SNI found and cannot determine target from {}",
+                client_addr
+            );
         }
     };
 
     // 3. 白名单检查
     if !router.is_allowed(&sni) {
-        warn!("Domain {} not in whitelist, rejecting connection from {}", sni, client_addr);
+        warn!(
+            "Domain {} not in whitelist, rejecting connection from {}",
+            sni, client_addr
+        );
         bail!("Domain '{}' is not in the whitelist", sni);
     }
 
@@ -124,35 +148,40 @@ async fn handle_client(
     let target_port = 443;
 
     // 5. 通过连接池获取 SOCKS5 连接
-    debug!("Getting connection to {}:{} from pool", target_host, target_port);
+    debug!(
+        "Getting connection to {}:{} from pool",
+        target_host, target_port
+    );
 
     // 克隆需要移动到闭包中的值
-    let socks5_addr = socks5_addr.clone();
-    let socks5_username = socks5_username.clone();
-    let socks5_password = socks5_password.clone();
+    let socks5_for_connect = socks5.clone();
 
-    let conn_guard = pool.get_connection(&target_host, target_port, move |host, port| {
-        // 将这些值移入 async block
-        let socks5_addr = socks5_addr.clone();
-        let socks5_username = socks5_username.clone();
-        let socks5_password = socks5_password.clone();
-        let host = host.to_string();
-        let port = port;
+    let conn_guard = pool
+        .get_connection(&target_host, target_port, move |host, port| {
+            // 将这些值移入 async block
+            let socks5 = socks5_for_connect.clone();
+            let host = host.to_string();
 
-        Box::pin(async move {
-            // 创建 SOCKS5 客户端并连接
-            let client = if let (Some(username), Some(password)) = (socks5_username, socks5_password) {
-                Socks5Client::new(socks5_addr)
-                    .with_auth(username, password)
-            } else {
-                Socks5Client::new(socks5_addr)
-            };
+            Box::pin(async move {
+                // 创建 SOCKS5 客户端并连接
+                let client =
+                    if let (Some(username), Some(password)) = (socks5.username, socks5.password) {
+                        Socks5Client::new(socks5.addr)
+                            .with_auth(username, password)
+                            .with_timeout(socks5.timeout)
+                    } else {
+                        Socks5Client::new(socks5.addr).with_timeout(socks5.timeout)
+                    };
 
-            client.connect(&host, port).await
+                client.connect(&host, port).await
+            })
         })
-    }).await?;
+        .await?;
 
-    info!("Established connection to {}:{} via SOCKS5", target_host, target_port);
+    debug!(
+        "Established connection to {}:{} via SOCKS5",
+        target_host, target_port
+    );
 
     // 6. 现在我们需要实际读取之前 peek 的数据
     // 因为 SOCKS5 连接已建立,我们开始转发数据
@@ -173,12 +202,14 @@ async fn handle_client(
 
     // 创建双向转发任务
     let client_to_proxy = async {
-        tokio::io::copy(&mut client_read, &mut proxy_write).await
+        tokio::io::copy(&mut client_read, &mut proxy_write)
+            .await
             .map_err(|e| anyhow!("Client to proxy copy failed: {}", e))
     };
 
     let proxy_to_client = async {
-        tokio::io::copy(&mut proxy_read, &mut client_write).await
+        tokio::io::copy(&mut proxy_read, &mut client_write)
+            .await
             .map_err(|e| anyhow!("Proxy to client copy failed: {}", e))
     };
 
@@ -200,7 +231,7 @@ async fn handle_client(
         }
     }
 
-    info!("Connection from {} closed", client_addr);
+    debug!("Connection from {} closed", client_addr);
     Ok(())
 }
 

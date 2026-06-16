@@ -1,14 +1,14 @@
 mod config;
-mod tls;
-mod tcp;
-mod quic;
-mod socks5;
-mod router;
 mod http;
+mod quic;
+mod router;
+mod socks5;
+mod tcp;
+mod tls;
 
 use anyhow::Result;
-use tracing::{info, error, warn};
-use tracing_subscriber::{EnvFilter, fmt, prelude::*};
+use tracing::{error, info, warn};
+use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
 use config::Config;
 
@@ -47,12 +47,13 @@ async fn main() -> Result<()> {
 
         // 检查端口是否需要权限
         if addr.port() < 1024 {
-            warn!("Warning: Port {} requires root privileges. Run with sudo if binding fails.", addr.port());
+            warn!(
+                "Warning: Port {} requires root privileges. Run with sudo if binding fails.",
+                addr.port()
+            );
         }
 
         let https_config = config.clone();
-        let https_router = router.clone();
-
         // TCP 监听器
         let tcp_config = https_config.clone();
         tasks.push(tokio::spawn(async move {
@@ -75,7 +76,10 @@ async fn main() -> Result<()> {
 
         // 检查端口是否需要权限
         if addr.port() < 1024 {
-            warn!("Warning: Port {} requires root privileges. Run with sudo if binding fails.", addr.port());
+            warn!(
+                "Warning: Port {} requires root privileges. Run with sudo if binding fails.",
+                addr.port()
+            );
         }
 
         let http_config = config.clone();
@@ -89,7 +93,9 @@ async fn main() -> Result<()> {
 
     // 检查是否至少配置了一个监听器
     if tasks.is_empty() {
-        anyhow::bail!("No listener configured. Please set listen_https_addr or listen_http_addr in config.");
+        anyhow::bail!(
+            "No listener configured. Please set listen_https_addr or listen_http_addr in config."
+        );
     }
 
     // 设置 Ctrl+C 信号处理
@@ -119,12 +125,9 @@ async fn main() -> Result<()> {
 
 /// 初始化日志系统
 fn init_logging() {
-    let env_filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("info"));
+    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
 
-    let formatting_layer = fmt::layer()
-        .with_target(false)
-        .with_thread_ids(true);
+    let formatting_layer = fmt::layer().with_target(false).with_thread_ids(true);
 
     tracing_subscriber::registry()
         .with(env_filter)

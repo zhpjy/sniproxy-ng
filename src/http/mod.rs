@@ -4,39 +4,40 @@
 
 use crate::config::Config;
 use crate::router::Router;
-use anyhow::{Result, anyhow, bail};
+use anyhow::{anyhow, bail, Result};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::net::TcpListener;
-use tracing::{info, debug, warn, error};
+use tracing::{debug, error, info, warn};
 
 pub mod error;
 pub mod parser;
 
-pub use error::{HttpError, Result as HttpResult};
+pub use error::HttpError;
 pub use parser::extract_host;
 
 /// 运行 HTTP 代理服务器
-pub async fn run(
-    config: Config,
-    router: Arc<Router>,
-) -> Result<()> {
-    let listen_addr = config.server.listen_http_addr
+pub async fn run(config: Config, router: Arc<Router>) -> Result<()> {
+    let listen_addr = config
+        .server
+        .listen_http_addr
         .ok_or_else(|| anyhow!("HTTP listen address not configured"))?;
 
     info!("Starting HTTP proxy server on {}", listen_addr);
 
     let listener = TcpListener::bind(&listen_addr).await?;
-    info!("HTTP proxy server listening on {}", listen_addr);
+    debug!("HTTP proxy server listening on {}", listen_addr);
 
     loop {
         match listener.accept().await {
             Ok((client_stream, client_addr)) => {
-                info!("Accepted HTTP connection from {}", client_addr);
+                debug!("Accepted HTTP connection from {}", client_addr);
 
                 let router_clone = router.clone();
                 let socks5_addr = config.socks5.addr.to_string();
                 let socks5_username = config.socks5.username.clone();
                 let socks5_password = config.socks5.password.clone();
+                let socks5_timeout = config.socks5.timeout;
 
                 tokio::spawn(async move {
                     if let Err(e) = handle_client(
@@ -46,7 +47,10 @@ pub async fn run(
                         socks5_addr,
                         socks5_username,
                         socks5_password,
-                    ).await {
+                        socks5_timeout,
+                    )
+                    .await
+                    {
                         error!("Error handling HTTP client {}: {}", client_addr, e);
                     }
                 });
@@ -66,6 +70,7 @@ async fn handle_client(
     socks5_addr: String,
     socks5_username: Option<String>,
     socks5_password: Option<String>,
+    socks5_timeout: u64,
 ) -> Result<()> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -73,7 +78,15 @@ async fn handle_client(
 
     let mut buffer = vec![0u8; 4096];
     let mut client_stream = client_stream;
-    let n = client_stream.peek(&mut buffer).await?;
+    let timeout = Duration::from_secs(socks5_timeout);
+    let n = tokio::time::timeout(timeout, client_stream.peek(&mut buffer))
+        .await
+        .map_err(|_| {
+            anyhow!(
+                "Timed out waiting for initial HTTP data from {}",
+                client_addr
+            )
+        })??;
 
     if n == 0 {
         warn!("HTTP client {} closed connection immediately", client_addr);
@@ -84,7 +97,7 @@ async fn handle_client(
 
     let host = match extract_host(&buffer[..n]) {
         Ok(h) => {
-            info!("Extracted Host: {} from {}", h, client_addr);
+            debug!("Extracted Host: {} from {}", h, client_addr);
             h
         }
         Err(e) => {
@@ -94,7 +107,10 @@ async fn handle_client(
     };
 
     if !router.is_allowed(&host) {
-        warn!("Domain '{}' not in whitelist, rejecting HTTP connection from {}", host, client_addr);
+        warn!(
+            "Domain '{}' not in whitelist, rejecting HTTP connection from {}",
+            host, client_addr
+        );
         bail!("Domain '{}' is not in the whitelist", host);
     }
 
@@ -108,13 +124,17 @@ async fn handle_client(
     let client = if let (Some(username), Some(password)) = (socks5_username, socks5_password) {
         Socks5Client::new(&socks5_addr)
             .with_auth(username, password)
+            .with_timeout(timeout)
     } else {
-        Socks5Client::new(&socks5_addr)
+        Socks5Client::new(&socks5_addr).with_timeout(timeout)
     };
 
     let mut socks5_stream = client.connect(&target_host, target_port).await?;
 
-    info!("Established HTTP connection to {}:{} via SOCKS5", target_host, target_port);
+    debug!(
+        "Established HTTP connection to {}:{} via SOCKS5",
+        target_host, target_port
+    );
 
     client_stream.read_exact(&mut buffer[..n]).await?;
     socks5_stream.write_all(&buffer[..n]).await?;
@@ -124,12 +144,14 @@ async fn handle_client(
     let (mut proxy_read, mut proxy_write) = tokio::io::split(socks5_stream);
 
     let client_to_proxy = async {
-        tokio::io::copy(&mut client_read, &mut proxy_write).await
+        tokio::io::copy(&mut client_read, &mut proxy_write)
+            .await
             .map_err(|e| anyhow!("Client to proxy copy failed: {}", e))
     };
 
     let proxy_to_client = async {
-        tokio::io::copy(&mut proxy_read, &mut client_write).await
+        tokio::io::copy(&mut proxy_read, &mut client_write)
+            .await
             .map_err(|e| anyhow!("Proxy to client copy failed: {}", e))
     };
 
@@ -148,6 +170,6 @@ async fn handle_client(
         }
     }
 
-    info!("HTTP connection from {} closed", client_addr);
+    debug!("HTTP connection from {} closed", client_addr);
     Ok(())
 }

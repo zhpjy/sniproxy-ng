@@ -2,7 +2,7 @@
 ///
 /// 根据配置的白名单规则检查域名是否被允许。
 use crate::config::{Config, Socks5Config};
-use tracing::{debug, info};
+use tracing::debug;
 
 /// 路由器
 #[derive(Clone)]
@@ -30,7 +30,7 @@ impl Router {
         // 检查是否匹配任一模式
         for pattern in &self.config.rules.allow {
             if self.match_pattern(hostname, pattern) {
-                info!(
+                debug!(
                     "Domain '{}' matched whitelist pattern '{}'",
                     hostname, pattern
                 );
