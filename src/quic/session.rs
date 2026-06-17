@@ -6,13 +6,11 @@ use crate::config::Socks5Config;
 use crate::quic::decrypt::extract_sni_from_quic_initial;
 use crate::router::Router;
 use crate::socks5::udp::Socks5UdpClient;
-use crate::socks5::Socks5Client;
 use anyhow::{anyhow, Result};
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 use tokio::sync::Mutex;
@@ -333,116 +331,33 @@ async fn resolve_target_addr(
             .ok_or_else(|| anyhow!("No A/AAAA record for {}:{}", host, port));
     }
 
-    if let Ok(doh_url) = std::env::var("SNIPROXY_DOH_URL") {
-        return resolve_with_doh_over_socks5(host, port, &doh_url, socks5_config).await;
-    }
-
-    if std::env::var("SNIPROXY_DNS_MODE").as_deref() == Ok("udp") {
-        let dns_server =
-            std::env::var("SNIPROXY_DNS_SERVER").unwrap_or_else(|_| "1.1.1.1:53".to_string());
-        let dns_server: SocketAddr = dns_server
-            .parse()
-            .map_err(|e| anyhow!("Invalid SNIPROXY_DNS_SERVER '{}': {}", dns_server, e))?;
-        return resolve_with_udp_dns(host, port, dns_server).await;
-    }
-
-    resolve_with_doh_over_socks5(
-        host,
-        port,
-        "https://cloudflare-dns.com/dns-query",
-        socks5_config,
-    )
-    .await
+    resolve_with_socks5_udp_dns(host, port, socks5_config).await
 }
 
-async fn resolve_with_doh_over_socks5(
+pub async fn probe_socks5_udp_relay(socks5_config: &Socks5Config) -> Result<()> {
+    let dns_server = upstream_dns_server()?;
+    resolve_with_socks5_udp_dns("example.com", 443, socks5_config)
+        .await
+        .map(|_| ())
+        .map_err(|e| {
+            anyhow!(
+                "SOCKS5 UDP relay probe failed via DNS server {}: {}",
+                dns_server,
+                e
+            )
+        })
+}
+
+async fn resolve_with_socks5_udp_dns(
     host: &str,
     port: u16,
-    doh_url: &str,
     socks5_config: &Socks5Config,
 ) -> Result<SocketAddr> {
-    let endpoint = parse_doh_url(doh_url)?;
+    let dns_server = upstream_dns_server()?;
     let mut last_error = None;
 
     for qtype in [1u16, 28u16] {
-        let query = build_dns_query(host, qtype)?;
-        match query_doh_once(&endpoint, &query, host, port, qtype, socks5_config).await {
-            Ok(Some(addr)) => return Ok(addr),
-            Ok(None) => {}
-            Err(e) => last_error = Some(e),
-        }
-    }
-
-    if let Some(e) = last_error {
-        Err(e)
-    } else {
-        Err(anyhow!(
-            "No A/AAAA record for {}:{} from DoH endpoint {}",
-            host,
-            port,
-            endpoint.host
-        ))
-    }
-}
-
-async fn query_doh_once(
-    endpoint: &DohEndpoint,
-    dns_query: &[u8],
-    host: &str,
-    port: u16,
-    qtype: u16,
-    socks5_config: &Socks5Config,
-) -> Result<Option<SocketAddr>> {
-    let timeout = Duration::from_secs(socks5_config.timeout);
-    let mut client = Socks5Client::new(socks5_config.addr.to_string()).with_timeout(timeout);
-    if let (Some(username), Some(password)) = (
-        socks5_config.username.clone(),
-        socks5_config.password.clone(),
-    ) {
-        client = client.with_auth(username, password);
-    }
-
-    let stream = client.connect(&endpoint.host, endpoint.port).await?;
-
-    let _ = rustls::crypto::ring::default_provider().install_default();
-    let mut root_store = rustls::RootCertStore::empty();
-    root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-    let tls_config = rustls::ClientConfig::builder()
-        .with_root_certificates(root_store)
-        .with_no_client_auth();
-    let connector = tokio_rustls::TlsConnector::from(Arc::new(tls_config));
-    let server_name = rustls::pki_types::ServerName::try_from(endpoint.host.clone())
-        .map_err(|_| anyhow!("Invalid DoH server name '{}'", endpoint.host))?;
-
-    let mut tls_stream = tokio::time::timeout(timeout, connector.connect(server_name, stream))
-        .await
-        .map_err(|_| anyhow!("DoH TLS connect timed out via {}", endpoint.host))?
-        .map_err(|e| anyhow!("DoH TLS connect failed via {}: {}", endpoint.host, e))?;
-
-    let request = format!(
-        "POST {} HTTP/1.1\r\nHost: {}\r\nAccept: application/dns-message\r\nContent-Type: application/dns-message\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-        endpoint.path,
-        endpoint.host,
-        dns_query.len()
-    );
-
-    tls_stream.write_all(request.as_bytes()).await?;
-    tls_stream.write_all(dns_query).await?;
-    tls_stream.flush().await?;
-
-    let mut response = Vec::new();
-    tokio::time::timeout(timeout, tls_stream.read_to_end(&mut response))
-        .await
-        .map_err(|_| anyhow!("DoH response timed out via {}", endpoint.host))??;
-
-    let body = parse_http_response_body(&response)?;
-    parse_dns_response(body, dns_txid(host, qtype), qtype, port)
-}
-
-async fn resolve_with_udp_dns(host: &str, port: u16, dns_server: SocketAddr) -> Result<SocketAddr> {
-    let mut last_error = None;
-    for qtype in [1u16, 28u16] {
-        match query_dns_once(host, port, dns_server, qtype).await {
+        match query_socks5_udp_dns_once(host, port, dns_server, qtype, socks5_config).await {
             Ok(Some(addr)) => return Ok(addr),
             Ok(None) => {}
             Err(e) => last_error = Some(e),
@@ -461,25 +376,38 @@ async fn resolve_with_udp_dns(host: &str, port: u16, dns_server: SocketAddr) -> 
     }
 }
 
-async fn query_dns_once(
+async fn query_socks5_udp_dns_once(
     host: &str,
     port: u16,
     dns_server: SocketAddr,
     qtype: u16,
+    socks5_config: &Socks5Config,
 ) -> Result<Option<SocketAddr>> {
     let query = build_dns_query(host, qtype)?;
 
-    let bind_addr = match dns_server {
-        SocketAddr::V4(_) => "0.0.0.0:0",
-        SocketAddr::V6(_) => "[::]:0",
+    let udp_client = if let (Some(username), Some(password)) =
+        (&socks5_config.username, &socks5_config.password)
+    {
+        Socks5UdpClient::new(socks5_config.addr.to_string())
+            .with_auth(username.clone(), password.clone())
+            .with_timeout(Duration::from_secs(socks5_config.timeout))
+    } else {
+        Socks5UdpClient::new(socks5_config.addr.to_string())
+            .with_timeout(Duration::from_secs(socks5_config.timeout))
     };
-    let socket = UdpSocket::bind(bind_addr).await?;
-    socket.send_to(&query, dns_server).await?;
+    let (relay, _) = udp_client.associate().await?;
+    relay.send_to(&query, dns_server).await?;
 
     let mut response = [0u8; 1500];
-    let (len, _) = tokio::time::timeout(Duration::from_secs(3), socket.recv_from(&mut response))
+    let (len, _) = tokio::time::timeout(Duration::from_secs(3), relay.recv_from(&mut response))
         .await
-        .map_err(|_| anyhow!("DNS query for {} timed out via {}", host, dns_server))??;
+        .map_err(|_| {
+            anyhow!(
+                "SOCKS5 UDP DNS query for {} timed out via {}",
+                host,
+                dns_server
+            )
+        })??;
 
     parse_dns_response(&response[..len], dns_txid(host, qtype), qtype, port)
 }
@@ -508,54 +436,12 @@ fn build_dns_query(host: &str, qtype: u16) -> Result<Vec<u8>> {
     Ok(query)
 }
 
-struct DohEndpoint {
-    host: String,
-    port: u16,
-    path: String,
-}
-
-fn parse_doh_url(url: &str) -> Result<DohEndpoint> {
-    let rest = url
-        .strip_prefix("https://")
-        .ok_or_else(|| anyhow!("SNIPROXY_DOH_URL must start with https://"))?;
-    let (authority, path) = match rest.split_once('/') {
-        Some((authority, path)) => (authority, format!("/{}", path)),
-        None => (rest, "/dns-query".to_string()),
-    };
-
-    let (host, port) = match authority.rsplit_once(':') {
-        Some((host, port)) if !host.ends_with(']') => {
-            let port = port
-                .parse()
-                .map_err(|e| anyhow!("Invalid DoH port '{}': {}", port, e))?;
-            (host.to_string(), port)
-        }
-        _ => (authority.to_string(), 443),
-    };
-
-    if host.is_empty() {
-        return Err(anyhow!("SNIPROXY_DOH_URL host is empty"));
-    }
-
-    Ok(DohEndpoint { host, port, path })
-}
-
-fn parse_http_response_body(response: &[u8]) -> Result<&[u8]> {
-    let header_end = response
-        .windows(4)
-        .position(|window| window == b"\r\n\r\n")
-        .ok_or_else(|| anyhow!("DoH response missing HTTP header terminator"))?;
-    let headers = std::str::from_utf8(&response[..header_end])
-        .map_err(|e| anyhow!("DoH response headers are not UTF-8: {}", e))?;
-    let status = headers
-        .lines()
-        .next()
-        .ok_or_else(|| anyhow!("DoH response missing status line"))?;
-    if !status.contains(" 200 ") {
-        return Err(anyhow!("DoH query failed: {}", status));
-    }
-
-    Ok(&response[header_end + 4..])
+fn upstream_dns_server() -> Result<SocketAddr> {
+    let dns_server =
+        std::env::var("SNIPROXY_DNS_SERVER").unwrap_or_else(|_| "1.1.1.1:53".to_string());
+    dns_server
+        .parse()
+        .map_err(|e| anyhow!("Invalid SNIPROXY_DNS_SERVER '{}': {}", dns_server, e))
 }
 
 fn parse_dns_response(

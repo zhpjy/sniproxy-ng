@@ -64,11 +64,21 @@ async fn main() -> Result<()> {
         }));
 
         // UDP 监听器 (QUIC/HTTP3)
-        tasks.push(tokio::spawn(async move {
-            if let Err(e) = quic::run(https_config).await {
-                error!("QUIC listener error: {}", e);
+        match should_start_quic(&https_config).await {
+            Ok(true) => {
+                tasks.push(tokio::spawn(async move {
+                    if let Err(e) = quic::run(https_config).await {
+                        error!("QUIC listener error: {}", e);
+                    }
+                }));
             }
-        }));
+            Ok(false) => {
+                info!("QUIC/HTTP3 listener disabled; clients should fall back to HTTPS/TCP");
+            }
+            Err(e) => {
+                error!("QUIC startup check failed: {}", e);
+            }
+        }
     }
 
     // HTTP 监听器
@@ -122,6 +132,40 @@ async fn main() -> Result<()> {
 
     info!("sniproxy-ng shutdown complete");
     Ok(())
+}
+
+async fn should_start_quic(config: &Config) -> Result<bool> {
+    let mode = std::env::var("SNIPROXY_QUIC_MODE").unwrap_or_else(|_| "auto".to_string());
+
+    match mode.as_str() {
+        "off" => Ok(false),
+        "on" => {
+            if let Err(e) = quic::session::probe_socks5_udp_relay(&config.socks5).await {
+                warn!(
+                    "SOCKS5 UDP relay probe failed, but SNIPROXY_QUIC_MODE=on; starting QUIC anyway: {}",
+                    e
+                );
+            }
+            Ok(true)
+        }
+        "auto" => match quic::session::probe_socks5_udp_relay(&config.socks5).await {
+            Ok(()) => {
+                info!("SOCKS5 UDP relay probe succeeded; enabling QUIC/HTTP3");
+                Ok(true)
+            }
+            Err(e) => {
+                warn!(
+                    "SOCKS5 UDP relay probe failed; disabling QUIC/HTTP3 so clients can fall back to HTTPS/TCP: {}",
+                    e
+                );
+                Ok(false)
+            }
+        },
+        other => anyhow::bail!(
+            "Invalid SNIPROXY_QUIC_MODE '{}'; expected auto, on, or off",
+            other
+        ),
+    }
 }
 
 /// 初始化日志系统

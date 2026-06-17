@@ -55,9 +55,9 @@ rm -f "$SERVER_LOG" "$CURL_LOG"
 
 (
   cd "$ROOT_DIR"
-  # QUIC 侧默认通过 SOCKS5 TCP 访问 DoH，避免本机 DNS/明文 UDP DNS 被污染。
-  # 可覆盖：SNIPROXY_DOH_URL=https://dns.google/dns-query
-  SNIPROXY_DOH_URL="${SNIPROXY_DOH_URL:-https://cloudflare-dns.com/dns-query}" \
+  # H3 测试需要 SOCKS5 UDP relay。DNS 查询会通过 SOCKS5 UDP 发往该服务器。
+  SNIPROXY_DNS_SERVER="${SNIPROXY_DNS_SERVER:-1.1.1.1:53}" \
+  SNIPROXY_QUIC_MODE="${SNIPROXY_QUIC_MODE:-auto}" \
   RUST_LOG="${RUST_LOG:-info}" "$BIN"
 ) >"$SERVER_LOG" 2>&1 &
 SERVER_PID="$!"
