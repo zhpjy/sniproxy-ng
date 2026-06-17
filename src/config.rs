@@ -22,6 +22,12 @@ pub struct ServerConfig {
     /// 日志格式: json, pretty
     #[serde(default = "default_log_format")]
     pub log_format: String,
+    /// 最大同时处理的客户端连接数
+    #[serde(default = "default_max_client_connections")]
+    pub max_client_connections: usize,
+    /// 转发阶段空闲超时(秒)
+    #[serde(default = "default_transfer_idle_timeout")]
+    pub transfer_idle_timeout: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -56,6 +62,14 @@ fn default_log_level() -> String {
 
 fn default_log_format() -> String {
     "pretty".to_string()
+}
+
+fn default_max_client_connections() -> usize {
+    512
+}
+
+fn default_transfer_idle_timeout() -> u64 {
+    300
 }
 
 fn default_timeout() -> u64 {
@@ -103,6 +117,8 @@ listen_https_addr = "0.0.0.0:443"
 listen_http_addr = "0.0.0.0:80"
 log_level = "debug"
 log_format = "json"
+max_client_connections = 512
+transfer_idle_timeout = 300
 
 [socks5]
 addr = "127.0.0.1:1080"
@@ -118,6 +134,8 @@ allow = ["*.google.com"]
         assert_eq!(config.server.listen_http_addr.unwrap().port(), 80);
         assert_eq!(config.server.log_level, "debug");
         assert_eq!(config.server.log_format, "json");
+        assert_eq!(config.server.max_client_connections, 512);
+        assert_eq!(config.server.transfer_idle_timeout, 300);
         assert_eq!(config.rules.allow.len(), 1);
     }
 
@@ -135,6 +153,8 @@ addr = "127.0.0.1:1080"
         let config: Config = toml::from_str(toml_str).unwrap();
         assert_eq!(config.server.listen_https_addr.unwrap().port(), 443);
         assert!(config.server.listen_http_addr.is_none());
+        assert_eq!(config.server.max_client_connections, 512);
+        assert_eq!(config.server.transfer_idle_timeout, 300);
     }
 
     #[test]

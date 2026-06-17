@@ -1,6 +1,7 @@
 mod config;
 mod http;
 mod quic;
+mod relay;
 mod router;
 mod socks5;
 mod tcp;

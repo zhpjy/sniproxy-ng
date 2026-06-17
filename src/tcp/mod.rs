@@ -1,4 +1,5 @@
 use crate::config::Config;
+use crate::relay::{copy_with_idle_timeout, log_accept_error};
 use crate::router::Router;
 use crate::socks5::{ConnectionPool, PoolConfig, Socks5Client};
 use crate::tls::sni::extract_sni;
@@ -7,6 +8,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::Semaphore;
 use tracing::{debug, error, info, warn};
 
 #[derive(Clone)]
@@ -15,6 +17,7 @@ struct Socks5Runtime {
     username: Option<String>,
     password: Option<String>,
     timeout: Duration,
+    transfer_idle_timeout: Duration,
 }
 
 /// 运行 TCP 代理服务器 (HTTP/1.1 + TLS)
@@ -44,7 +47,15 @@ pub async fn run(config: Config) -> Result<()> {
     pool.clone().spawn_cleanup_task();
     debug!("TCP connection pool cleanup task started");
 
+    let accept_limit = Arc::new(Semaphore::new(config.server.max_client_connections.max(1)));
+
     loop {
+        let client_permit = accept_limit
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|e| anyhow!("TCP accept limiter closed: {}", e))?;
+
         match listener.accept().await {
             Ok((client_stream, client_addr)) => {
                 debug!("Accepted connection from {}", client_addr);
@@ -57,8 +68,12 @@ pub async fn run(config: Config) -> Result<()> {
                     username: config.socks5.username.clone(),
                     password: config.socks5.password.clone(),
                     timeout: Duration::from_secs(config.socks5.timeout),
+                    transfer_idle_timeout: Duration::from_secs(
+                        config.server.transfer_idle_timeout.max(1),
+                    ),
                 };
                 tokio::spawn(async move {
+                    let _client_permit = client_permit;
                     if let Err(e) =
                         handle_client(client_stream, client_addr, router_clone, pool_clone, socks5)
                             .await
@@ -68,7 +83,8 @@ pub async fn run(config: Config) -> Result<()> {
                 });
             }
             Err(e) => {
-                error!("Error accepting connection: {}", e);
+                drop(client_permit);
+                log_accept_error("connection", &e).await;
             }
         }
     }
@@ -201,14 +217,15 @@ async fn handle_client(
     let (mut proxy_read, mut proxy_write) = tokio::io::split(socks5_stream);
 
     // 创建双向转发任务
+    let idle_timeout = socks5.transfer_idle_timeout;
     let client_to_proxy = async {
-        tokio::io::copy(&mut client_read, &mut proxy_write)
+        copy_with_idle_timeout(&mut client_read, &mut proxy_write, idle_timeout)
             .await
             .map_err(|e| anyhow!("Client to proxy copy failed: {}", e))
     };
 
     let proxy_to_client = async {
-        tokio::io::copy(&mut proxy_read, &mut client_write)
+        copy_with_idle_timeout(&mut proxy_read, &mut client_write, idle_timeout)
             .await
             .map_err(|e| anyhow!("Proxy to client copy failed: {}", e))
     };
@@ -219,15 +236,11 @@ async fn handle_client(
             if let Err(e) = result {
                 debug!("Client to proxy forwarding ended: {}", e);
             }
-            // 关闭另一半
-            let _ = proxy_write.shutdown().await;
         }
         result = proxy_to_client => {
             if let Err(e) = result {
                 debug!("Proxy to client forwarding ended: {}", e);
             }
-            // 关闭另一半
-            let _ = client_write.shutdown().await;
         }
     }
 

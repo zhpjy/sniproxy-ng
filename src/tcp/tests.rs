@@ -16,6 +16,8 @@ mod integration_tests {
                 listen_http_addr: None,
                 log_level: "debug".to_string(),
                 log_format: "pretty".to_string(),
+                max_client_connections: 512,
+                transfer_idle_timeout: 300,
             },
             socks5: crate::config::Socks5Config {
                 addr: "127.0.0.1:1080".parse().unwrap(),

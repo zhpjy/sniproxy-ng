@@ -3,11 +3,13 @@
 //! 通过 Host 请求头提取目标域名,通过 SOCKS5 转发流量。
 
 use crate::config::Config;
+use crate::relay::{copy_with_idle_timeout, log_accept_error};
 use crate::router::Router;
 use anyhow::{anyhow, bail, Result};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::TcpListener;
+use tokio::sync::Semaphore;
 use tracing::{debug, error, info, warn};
 
 pub mod error;
@@ -28,7 +30,15 @@ pub async fn run(config: Config, router: Arc<Router>) -> Result<()> {
     let listener = TcpListener::bind(&listen_addr).await?;
     debug!("HTTP proxy server listening on {}", listen_addr);
 
+    let accept_limit = Arc::new(Semaphore::new(config.server.max_client_connections.max(1)));
+
     loop {
+        let client_permit = accept_limit
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|e| anyhow!("HTTP accept limiter closed: {}", e))?;
+
         match listener.accept().await {
             Ok((client_stream, client_addr)) => {
                 debug!("Accepted HTTP connection from {}", client_addr);
@@ -38,8 +48,10 @@ pub async fn run(config: Config, router: Arc<Router>) -> Result<()> {
                 let socks5_username = config.socks5.username.clone();
                 let socks5_password = config.socks5.password.clone();
                 let socks5_timeout = config.socks5.timeout;
+                let transfer_idle_timeout = config.server.transfer_idle_timeout.max(1);
 
                 tokio::spawn(async move {
+                    let _client_permit = client_permit;
                     if let Err(e) = handle_client(
                         client_stream,
                         client_addr,
@@ -48,6 +60,7 @@ pub async fn run(config: Config, router: Arc<Router>) -> Result<()> {
                         socks5_username,
                         socks5_password,
                         socks5_timeout,
+                        transfer_idle_timeout,
                     )
                     .await
                     {
@@ -56,7 +69,8 @@ pub async fn run(config: Config, router: Arc<Router>) -> Result<()> {
                 });
             }
             Err(e) => {
-                error!("Error accepting HTTP connection: {}", e);
+                drop(client_permit);
+                log_accept_error("HTTP connection", &e).await;
             }
         }
     }
@@ -71,6 +85,7 @@ async fn handle_client(
     socks5_username: Option<String>,
     socks5_password: Option<String>,
     socks5_timeout: u64,
+    transfer_idle_timeout: u64,
 ) -> Result<()> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -143,14 +158,15 @@ async fn handle_client(
     let (mut client_read, mut client_write) = client_stream.split();
     let (mut proxy_read, mut proxy_write) = tokio::io::split(socks5_stream);
 
+    let idle_timeout = Duration::from_secs(transfer_idle_timeout);
     let client_to_proxy = async {
-        tokio::io::copy(&mut client_read, &mut proxy_write)
+        copy_with_idle_timeout(&mut client_read, &mut proxy_write, idle_timeout)
             .await
             .map_err(|e| anyhow!("Client to proxy copy failed: {}", e))
     };
 
     let proxy_to_client = async {
-        tokio::io::copy(&mut proxy_read, &mut client_write)
+        copy_with_idle_timeout(&mut proxy_read, &mut client_write, idle_timeout)
             .await
             .map_err(|e| anyhow!("Proxy to client copy failed: {}", e))
     };
@@ -160,13 +176,11 @@ async fn handle_client(
             if let Err(e) = result {
                 debug!("HTTP client to proxy forwarding ended: {}", e);
             }
-            let _ = proxy_write.shutdown().await;
         }
         result = proxy_to_client => {
             if let Err(e) = result {
                 debug!("HTTP proxy to client forwarding ended: {}", e);
             }
-            let _ = client_write.shutdown().await;
         }
     }
 

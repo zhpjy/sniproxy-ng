@@ -18,17 +18,21 @@
 listen_https_addr = "0.0.0.0:443"   # HTTPS 端口（可选）
 listen_http_addr = "0.0.0.0:80"     # HTTP 端口（可选）
 log_level = "info"
+max_client_connections = 512        # 最大同时处理的客户端连接数
+transfer_idle_timeout = 300         # 转发空闲超时（秒）
 
 [socks5]
 addr = "127.0.0.1:1080"
 timeout = 30
-max_connections = 100
+max_connections = 100               # SOCKS5 后端最大连接数
 
 [rules]
 allow = ["*.google.com", "*youtube.com"]  # 空数组允许所有域名
 ```
 
 两个端口独立配置，可分别启用。
+
+`max_client_connections` 是入站客户端并发上限，用于保护进程 fd；`max_connections` 是到 SOCKS5 后端的连接上限。生产环境还应配合 systemd `LimitNOFILE` 或 `ulimit -n` 设置足够的 fd 上限。
 
 ## 使用
 

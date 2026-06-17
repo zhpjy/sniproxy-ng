@@ -5,6 +5,7 @@
 pub mod config;
 pub mod http;
 pub mod quic;
+pub mod relay;
 pub mod router;
 pub mod socks5;
 pub mod tcp;

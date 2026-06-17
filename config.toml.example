@@ -13,6 +13,13 @@ log_level = "info"
 # 日志格式: json, pretty
 log_format = "pretty"
 
+# 最大同时处理的客户端连接数
+# 一条 TCP 代理连接通常占用客户端和 SOCKS5 两个 fd，生产环境需结合 LimitNOFILE/ulimit 设置。
+max_client_connections = 512
+
+# 转发阶段空闲超时(秒)，超过该时间没有数据流动则关闭连接
+transfer_idle_timeout = 300
+
 [socks5]
 # SOCKS5 代理地址
 addr = "127.0.0.1:1080"
@@ -20,7 +27,7 @@ addr = "127.0.0.1:1080"
 # TCP 连接超时(秒)
 timeout = 30
 
-# 连接池最大连接数
+# SOCKS5 后端最大连接数
 max_connections = 100
 
 # 可选: SOCKS5 认证
