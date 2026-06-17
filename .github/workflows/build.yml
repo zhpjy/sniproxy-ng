@@ -68,13 +68,20 @@ jobs:
         with:
           tool: cross
 
-      - name: Build binary
+      - name: Build binary (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
         run: |
           if [ "${{ matrix.use_cross }}" = "true" ]; then
             cross build --release --target ${{ matrix.target }}
           else
             cargo build --release --target ${{ matrix.target }}
           fi
+
+      - name: Build binary (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: cargo build --release --target ${{ matrix.target }}
 
       - name: Resolve package version
         id: package_meta
