@@ -1,6 +1,9 @@
 name: Build Release Binaries
 
 on:
+  push:
+    tags:
+      - 'v*'
   workflow_dispatch:
     inputs:
       release_tag:
@@ -8,37 +11,47 @@ on:
         required: false
         type: string
 
+permissions:
+  contents: read
+
 jobs:
   build:
-    name: Build on ${{ matrix.target }}
-    runs-on: ${{ matrix.os }}
+    name: Build ${{ matrix.asset_name }}
+    runs-on: ${{ matrix.runner }}
     strategy:
+      fail-fast: false
       matrix:
         include:
-          # - os: ubuntu-latest
-          #   target: x86_64-unknown-linux-gnu
-          #   artifact_name: sniproxy-ng
-          #   asset_name: sniproxy-ng-linux-amd64
-          - os: ubuntu-latest
+          - runner: ubuntu-latest
             target: x86_64-unknown-linux-musl
-            artifact_name: sniproxy-ng
             asset_name: sniproxy-ng-linux-amd64-musl
-          # - os: ubuntu-latest
-          #   target: aarch64-unknown-linux-gnu
-          #   artifact_name: sniproxy-ng
-          #   asset_name: sniproxy-ng-linux-aarch64
-          # - os: windows-latest
-          #   target: x86_64-pc-windows-gnu
-          #   artifact_name: sniproxy-ng.exe
-          #   asset_name: sniproxy-ng-windows-amd64.exe
-          # - os: macos-latest
-          #   target: x86_64-apple-darwin
-          #   artifact_name: sniproxy-ng
-          #   asset_name: sniproxy-ng-darwin-amd64
-          # - os: macos-latest
-          #   target: aarch64-apple-darwin
-          #   artifact_name: sniproxy-ng
-          #   asset_name: sniproxy-ng-darwin-aarch64
+            package_stem: sniproxy-ng-linux-amd64-musl
+            binary_name: sniproxy-ng
+            use_cross: true
+          - runner: ubuntu-latest
+            target: aarch64-unknown-linux-musl
+            asset_name: sniproxy-ng-linux-arm64-musl
+            package_stem: sniproxy-ng-linux-arm64-musl
+            binary_name: sniproxy-ng
+            use_cross: true
+          - runner: macos-13
+            target: x86_64-apple-darwin
+            asset_name: sniproxy-ng-darwin-amd64
+            package_stem: sniproxy-ng-darwin-amd64
+            binary_name: sniproxy-ng
+            use_cross: false
+          - runner: macos-14
+            target: aarch64-apple-darwin
+            asset_name: sniproxy-ng-darwin-arm64
+            package_stem: sniproxy-ng-darwin-arm64
+            binary_name: sniproxy-ng
+            use_cross: false
+          - runner: windows-latest
+            target: x86_64-pc-windows-msvc
+            asset_name: sniproxy-ng-windows-amd64
+            package_stem: sniproxy-ng-windows-amd64
+            binary_name: sniproxy-ng.exe
+            use_cross: false
 
     steps:
       - name: Checkout code
@@ -49,43 +62,85 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      - name: Install musl tools (Linux musl)
-        if: matrix.target == 'x86_64-unknown-linux-musl'
-        run: sudo apt-get install -y musl-tools
-
-      - name: Setup cross compilation for aarch64 (Linux)
-        if: matrix.target == 'aarch64-unknown-linux-gnu'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu
-          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
+      - name: Install cross
+        if: matrix.use_cross
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cross
 
       - name: Build binary
-        run: cargo build --release --target ${{ matrix.target }}
+        run: |
+          if [ "${{ matrix.use_cross }}" = "true" ]; then
+            cross build --release --target ${{ matrix.target }}
+          else
+            cargo build --release --target ${{ matrix.target }}
+          fi
 
-      - name: Strip binary (Linux/macOS)
+      - name: Resolve package version
+        id: package_meta
+        shell: bash
+        run: |
+          if [ -n "${{ github.event.inputs.release_tag }}" ]; then
+            version="${{ github.event.inputs.release_tag }}"
+          elif [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            version="${GITHUB_REF_NAME}"
+          else
+            version="sha-${GITHUB_SHA::7}"
+          fi
+          package_dir="${{ matrix.package_stem }}-${version}"
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            archive_name="${package_dir}.zip"
+          else
+            archive_name="${package_dir}.tar.gz"
+          fi
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "package_dir=${package_dir}" >> "$GITHUB_OUTPUT"
+          echo "archive_name=${archive_name}" >> "$GITHUB_OUTPUT"
+
+      - name: Package artifact (Unix)
         if: runner.os != 'Windows'
-        run: strip target/${{ matrix.target }}/release/${{ matrix.artifact_name }}
+        shell: bash
+        run: |
+          mkdir -p dist
+          mkdir "${{ steps.package_meta.outputs.package_dir }}"
+          cp target/${{ matrix.target }}/release/${{ matrix.binary_name }} "${{ steps.package_meta.outputs.package_dir }}/sniproxy-ng"
+          cp config.toml.example "${{ steps.package_meta.outputs.package_dir }}/config.toml.example"
+          tar -czf "dist/${{ steps.package_meta.outputs.archive_name }}" "${{ steps.package_meta.outputs.package_dir }}"
 
-      - name: Strip binary (Windows)
+      - name: Package artifact (Windows)
         if: runner.os == 'Windows'
-        run: strip target/${{ matrix.target }}/release/${{ matrix.artifact_name }}
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          New-Item -ItemType Directory -Force -Path "${{ steps.package_meta.outputs.package_dir }}" | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/${{ matrix.binary_name }}" "${{ steps.package_meta.outputs.package_dir }}/sniproxy-ng.exe"
+          Copy-Item "config.toml.example" "${{ steps.package_meta.outputs.package_dir }}/config.toml.example"
+          Compress-Archive -Path "${{ steps.package_meta.outputs.package_dir }}" -DestinationPath "dist/${{ steps.package_meta.outputs.archive_name }}" -Force
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.asset_name }}
-          path: target/${{ matrix.target }}/release/${{ matrix.artifact_name }}
+          name: ${{ steps.package_meta.outputs.archive_name }}
+          path: dist/${{ steps.package_meta.outputs.archive_name }}
 
   release:
     name: Create Release
     needs: build
     runs-on: ubuntu-latest
-    if: inputs.release_tag != ''
+    if: startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag != '')
     permissions:
       contents: write
 
     steps:
+      - name: Resolve release tag
+        id: resolve_tag
+        run: |
+          if [ -n "${{ github.event.inputs.release_tag }}" ]; then
+            echo "tag=${{ github.event.inputs.release_tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
@@ -94,7 +149,7 @@ jobs:
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ inputs.release_tag }}
+          tag_name: ${{ steps.resolve_tag.outputs.tag }}
           files: artifacts/*/*
           draft: false
           prerelease: false
