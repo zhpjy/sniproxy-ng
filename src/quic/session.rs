@@ -6,11 +6,13 @@ use crate::config::Socks5Config;
 use crate::quic::decrypt::extract_sni_from_quic_initial;
 use crate::router::Router;
 use crate::socks5::udp::Socks5UdpClient;
+use crate::socks5::Socks5Client;
 use anyhow::{anyhow, Result};
 use std::collections::HashMap;
-use std::net::SocketAddr;
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 use tokio::sync::Mutex;
@@ -181,12 +183,11 @@ impl QuicSessionManager {
             }
         }
 
-        // 解析目标地址：SNI -> ip:443
-        let target_addr = tokio::net::lookup_host((sni.as_str(), 443))
-            .await
-            .map_err(|e| anyhow!("Failed to resolve {}:443: {}", sni, e))?
-            .next()
-            .ok_or_else(|| anyhow!("No A/AAAA record for {}:443", sni))?;
+        let socks5_config = {
+            let inner = self.inner.lock().await;
+            inner.socks5_config.clone()
+        };
+        let target_addr = resolve_target_addr(&sni, 443, &socks5_config).await?;
 
         // 创建 SOCKS5 UDP relay
         let (socks5_relay, relay_addr, socket) = {
@@ -317,6 +318,357 @@ impl QuicSessionManager {
             }
         })
     }
+}
+
+async fn resolve_target_addr(
+    host: &str,
+    port: u16,
+    socks5_config: &Socks5Config,
+) -> Result<SocketAddr> {
+    if std::env::var("SNIPROXY_DNS_DIRECT").as_deref() == Ok("1") {
+        return tokio::net::lookup_host((host, port))
+            .await
+            .map_err(|e| anyhow!("Failed to resolve {}:{}: {}", host, port, e))?
+            .next()
+            .ok_or_else(|| anyhow!("No A/AAAA record for {}:{}", host, port));
+    }
+
+    if let Ok(doh_url) = std::env::var("SNIPROXY_DOH_URL") {
+        return resolve_with_doh_over_socks5(host, port, &doh_url, socks5_config).await;
+    }
+
+    if std::env::var("SNIPROXY_DNS_MODE").as_deref() == Ok("udp") {
+        let dns_server =
+            std::env::var("SNIPROXY_DNS_SERVER").unwrap_or_else(|_| "1.1.1.1:53".to_string());
+        let dns_server: SocketAddr = dns_server
+            .parse()
+            .map_err(|e| anyhow!("Invalid SNIPROXY_DNS_SERVER '{}': {}", dns_server, e))?;
+        return resolve_with_udp_dns(host, port, dns_server).await;
+    }
+
+    resolve_with_doh_over_socks5(
+        host,
+        port,
+        "https://cloudflare-dns.com/dns-query",
+        socks5_config,
+    )
+    .await
+}
+
+async fn resolve_with_doh_over_socks5(
+    host: &str,
+    port: u16,
+    doh_url: &str,
+    socks5_config: &Socks5Config,
+) -> Result<SocketAddr> {
+    let endpoint = parse_doh_url(doh_url)?;
+    let mut last_error = None;
+
+    for qtype in [1u16, 28u16] {
+        let query = build_dns_query(host, qtype)?;
+        match query_doh_once(&endpoint, &query, host, port, qtype, socks5_config).await {
+            Ok(Some(addr)) => return Ok(addr),
+            Ok(None) => {}
+            Err(e) => last_error = Some(e),
+        }
+    }
+
+    if let Some(e) = last_error {
+        Err(e)
+    } else {
+        Err(anyhow!(
+            "No A/AAAA record for {}:{} from DoH endpoint {}",
+            host,
+            port,
+            endpoint.host
+        ))
+    }
+}
+
+async fn query_doh_once(
+    endpoint: &DohEndpoint,
+    dns_query: &[u8],
+    host: &str,
+    port: u16,
+    qtype: u16,
+    socks5_config: &Socks5Config,
+) -> Result<Option<SocketAddr>> {
+    let timeout = Duration::from_secs(socks5_config.timeout);
+    let mut client = Socks5Client::new(socks5_config.addr.to_string()).with_timeout(timeout);
+    if let (Some(username), Some(password)) = (
+        socks5_config.username.clone(),
+        socks5_config.password.clone(),
+    ) {
+        client = client.with_auth(username, password);
+    }
+
+    let stream = client.connect(&endpoint.host, endpoint.port).await?;
+
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let mut root_store = rustls::RootCertStore::empty();
+    root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    let tls_config = rustls::ClientConfig::builder()
+        .with_root_certificates(root_store)
+        .with_no_client_auth();
+    let connector = tokio_rustls::TlsConnector::from(Arc::new(tls_config));
+    let server_name = rustls::pki_types::ServerName::try_from(endpoint.host.clone())
+        .map_err(|_| anyhow!("Invalid DoH server name '{}'", endpoint.host))?;
+
+    let mut tls_stream = tokio::time::timeout(timeout, connector.connect(server_name, stream))
+        .await
+        .map_err(|_| anyhow!("DoH TLS connect timed out via {}", endpoint.host))?
+        .map_err(|e| anyhow!("DoH TLS connect failed via {}: {}", endpoint.host, e))?;
+
+    let request = format!(
+        "POST {} HTTP/1.1\r\nHost: {}\r\nAccept: application/dns-message\r\nContent-Type: application/dns-message\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        endpoint.path,
+        endpoint.host,
+        dns_query.len()
+    );
+
+    tls_stream.write_all(request.as_bytes()).await?;
+    tls_stream.write_all(dns_query).await?;
+    tls_stream.flush().await?;
+
+    let mut response = Vec::new();
+    tokio::time::timeout(timeout, tls_stream.read_to_end(&mut response))
+        .await
+        .map_err(|_| anyhow!("DoH response timed out via {}", endpoint.host))??;
+
+    let body = parse_http_response_body(&response)?;
+    parse_dns_response(body, dns_txid(host, qtype), qtype, port)
+}
+
+async fn resolve_with_udp_dns(host: &str, port: u16, dns_server: SocketAddr) -> Result<SocketAddr> {
+    let mut last_error = None;
+    for qtype in [1u16, 28u16] {
+        match query_dns_once(host, port, dns_server, qtype).await {
+            Ok(Some(addr)) => return Ok(addr),
+            Ok(None) => {}
+            Err(e) => last_error = Some(e),
+        }
+    }
+
+    if let Some(e) = last_error {
+        Err(e)
+    } else {
+        Err(anyhow!(
+            "No A/AAAA record for {}:{} from DNS server {}",
+            host,
+            port,
+            dns_server
+        ))
+    }
+}
+
+async fn query_dns_once(
+    host: &str,
+    port: u16,
+    dns_server: SocketAddr,
+    qtype: u16,
+) -> Result<Option<SocketAddr>> {
+    let query = build_dns_query(host, qtype)?;
+
+    let bind_addr = match dns_server {
+        SocketAddr::V4(_) => "0.0.0.0:0",
+        SocketAddr::V6(_) => "[::]:0",
+    };
+    let socket = UdpSocket::bind(bind_addr).await?;
+    socket.send_to(&query, dns_server).await?;
+
+    let mut response = [0u8; 1500];
+    let (len, _) = tokio::time::timeout(Duration::from_secs(3), socket.recv_from(&mut response))
+        .await
+        .map_err(|_| anyhow!("DNS query for {} timed out via {}", host, dns_server))??;
+
+    parse_dns_response(&response[..len], dns_txid(host, qtype), qtype, port)
+}
+
+fn build_dns_query(host: &str, qtype: u16) -> Result<Vec<u8>> {
+    let mut query = Vec::with_capacity(512);
+    let txid = dns_txid(host, qtype);
+    query.extend_from_slice(&txid.to_be_bytes());
+    query.extend_from_slice(&0x0100u16.to_be_bytes()); // recursion desired
+    query.extend_from_slice(&1u16.to_be_bytes()); // qdcount
+    query.extend_from_slice(&0u16.to_be_bytes()); // ancount
+    query.extend_from_slice(&0u16.to_be_bytes()); // nscount
+    query.extend_from_slice(&0u16.to_be_bytes()); // arcount
+
+    for label in host.trim_end_matches('.').split('.') {
+        if label.is_empty() || label.len() > 63 {
+            return Err(anyhow!("Invalid DNS label in host '{}'", host));
+        }
+        query.push(label.len() as u8);
+        query.extend_from_slice(label.as_bytes());
+    }
+    query.push(0);
+    query.extend_from_slice(&qtype.to_be_bytes());
+    query.extend_from_slice(&1u16.to_be_bytes()); // IN
+
+    Ok(query)
+}
+
+struct DohEndpoint {
+    host: String,
+    port: u16,
+    path: String,
+}
+
+fn parse_doh_url(url: &str) -> Result<DohEndpoint> {
+    let rest = url
+        .strip_prefix("https://")
+        .ok_or_else(|| anyhow!("SNIPROXY_DOH_URL must start with https://"))?;
+    let (authority, path) = match rest.split_once('/') {
+        Some((authority, path)) => (authority, format!("/{}", path)),
+        None => (rest, "/dns-query".to_string()),
+    };
+
+    let (host, port) = match authority.rsplit_once(':') {
+        Some((host, port)) if !host.ends_with(']') => {
+            let port = port
+                .parse()
+                .map_err(|e| anyhow!("Invalid DoH port '{}': {}", port, e))?;
+            (host.to_string(), port)
+        }
+        _ => (authority.to_string(), 443),
+    };
+
+    if host.is_empty() {
+        return Err(anyhow!("SNIPROXY_DOH_URL host is empty"));
+    }
+
+    Ok(DohEndpoint { host, port, path })
+}
+
+fn parse_http_response_body(response: &[u8]) -> Result<&[u8]> {
+    let header_end = response
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .ok_or_else(|| anyhow!("DoH response missing HTTP header terminator"))?;
+    let headers = std::str::from_utf8(&response[..header_end])
+        .map_err(|e| anyhow!("DoH response headers are not UTF-8: {}", e))?;
+    let status = headers
+        .lines()
+        .next()
+        .ok_or_else(|| anyhow!("DoH response missing status line"))?;
+    if !status.contains(" 200 ") {
+        return Err(anyhow!("DoH query failed: {}", status));
+    }
+
+    Ok(&response[header_end + 4..])
+}
+
+fn parse_dns_response(
+    response: &[u8],
+    expected_txid: u16,
+    expected_qtype: u16,
+    port: u16,
+) -> Result<Option<SocketAddr>> {
+    if response.len() < 12 {
+        return Err(anyhow!("DNS response too short"));
+    }
+    if u16::from_be_bytes([response[0], response[1]]) != expected_txid {
+        return Err(anyhow!("DNS transaction id mismatch"));
+    }
+
+    let flags = u16::from_be_bytes([response[2], response[3]]);
+    if flags & 0x8000 == 0 {
+        return Err(anyhow!("DNS response is not marked as response"));
+    }
+    if flags & 0x000f != 0 {
+        return Ok(None);
+    }
+
+    let qdcount = u16::from_be_bytes([response[4], response[5]]) as usize;
+    let ancount = u16::from_be_bytes([response[6], response[7]]) as usize;
+    let mut offset = 12;
+
+    for _ in 0..qdcount {
+        offset = skip_dns_name(response, offset)?;
+        if response.len() < offset + 4 {
+            return Err(anyhow!("DNS question truncated"));
+        }
+        offset += 4;
+    }
+
+    for _ in 0..ancount {
+        offset = skip_dns_name(response, offset)?;
+        if response.len() < offset + 10 {
+            return Err(anyhow!("DNS answer truncated"));
+        }
+
+        let rr_type = u16::from_be_bytes([response[offset], response[offset + 1]]);
+        let rr_class = u16::from_be_bytes([response[offset + 2], response[offset + 3]]);
+        let rdlen = u16::from_be_bytes([response[offset + 8], response[offset + 9]]) as usize;
+        offset += 10;
+
+        if response.len() < offset + rdlen {
+            return Err(anyhow!("DNS answer data truncated"));
+        }
+
+        if rr_class == 1 && rr_type == expected_qtype {
+            match (rr_type, rdlen) {
+                (1, 4) => {
+                    let ip = Ipv4Addr::new(
+                        response[offset],
+                        response[offset + 1],
+                        response[offset + 2],
+                        response[offset + 3],
+                    );
+                    return Ok(Some(SocketAddr::new(ip.into(), port)));
+                }
+                (28, 16) => {
+                    let mut octets = [0u8; 16];
+                    octets.copy_from_slice(&response[offset..offset + 16]);
+                    return Ok(Some(SocketAddr::new(Ipv6Addr::from(octets).into(), port)));
+                }
+                _ => {}
+            }
+        }
+
+        offset += rdlen;
+    }
+
+    Ok(None)
+}
+
+fn skip_dns_name(packet: &[u8], mut offset: usize) -> Result<usize> {
+    loop {
+        if offset >= packet.len() {
+            return Err(anyhow!("DNS name truncated"));
+        }
+
+        let len = packet[offset];
+        if len & 0xc0 == 0xc0 {
+            if offset + 1 >= packet.len() {
+                return Err(anyhow!("DNS compression pointer truncated"));
+            }
+            return Ok(offset + 2);
+        }
+
+        offset += 1;
+        if len == 0 {
+            return Ok(offset);
+        }
+
+        if len & 0xc0 != 0 {
+            return Err(anyhow!("Unsupported DNS label encoding"));
+        }
+
+        offset += len as usize;
+        if offset > packet.len() {
+            return Err(anyhow!("DNS label truncated"));
+        }
+    }
+}
+
+fn dns_txid(host: &str, qtype: u16) -> u16 {
+    let mut hash = 0x811c9dc5u32;
+    for byte in host.as_bytes() {
+        hash ^= *byte as u32;
+        hash = hash.wrapping_mul(0x01000193);
+    }
+    (hash as u16) ^ qtype
 }
 
 impl Clone for QuicSessionManager {

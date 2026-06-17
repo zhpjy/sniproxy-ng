@@ -34,6 +34,16 @@ allow = ["*.google.com", "*youtube.com"]  # 空数组允许所有域名
 
 `max_client_connections` 是入站客户端并发上限，用于保护进程 fd；`max_connections` 是到 SOCKS5 后端的连接上限。生产环境还应配合 systemd `LimitNOFILE` 或 `ulimit -n` 设置足够的 fd 上限。
 
+QUIC/HTTP3 需要把 SNI 解析成目标 IP。默认解析路径是 DoH over SOCKS5 TCP：
+
+```bash
+SNIPROXY_DOH_URL=https://cloudflare-dns.com/dns-query
+```
+
+DNS 查询会先通过 SOCKS5 后端连接 DoH 服务端，再发 HTTPS DNS 查询，避免本机 DNS 或明文 UDP/53 被污染。仅调试时可设置 `SNIPROXY_DNS_MODE=udp` + `SNIPROXY_DNS_SERVER=1.1.1.1:53` 使用明文 UDP DNS；该 UDP DNS 查询由本机直接发出，不走 SOCKS5 代理。也可设置 `SNIPROXY_DNS_DIRECT=1` 使用系统 DNS。
+
+详细说明见 [DNS Resolution](docs/DNS_RESOLUTION.md)。
+
 ## 使用
 
 ```bash

@@ -16,6 +16,8 @@ fast-socks5 = "0.9"
 # TLS 库 - 用于解析 SNI
 rustls = { version = "0.23", features = ["std"] }
 rustls-pemfile = "2.1"
+tokio-rustls = "0.26"
+webpki-roots = "0.26"
 
 # QUIC 协议栈
 quinn = "0.11"

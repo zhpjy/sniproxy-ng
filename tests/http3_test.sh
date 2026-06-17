@@ -55,9 +55,9 @@ rm -f "$SERVER_LOG" "$CURL_LOG"
 
 (
   cd "$ROOT_DIR"
-  # 如果本机 DNS 被污染，QUIC 侧需要一个“可信 DNS”来把 SNI 解析成真实 ip:443
-  # 可覆盖：SNIPROXY_DNS_SERVER=8.8.8.8:53
-  SNIPROXY_DNS_SERVER="${SNIPROXY_DNS_SERVER:-1.1.1.1:53}" \
+  # QUIC 侧默认通过 SOCKS5 TCP 访问 DoH，避免本机 DNS/明文 UDP DNS 被污染。
+  # 可覆盖：SNIPROXY_DOH_URL=https://dns.google/dns-query
+  SNIPROXY_DOH_URL="${SNIPROXY_DOH_URL:-https://cloudflare-dns.com/dns-query}" \
   RUST_LOG="${RUST_LOG:-info}" "$BIN"
 ) >"$SERVER_LOG" 2>&1 &
 SERVER_PID="$!"

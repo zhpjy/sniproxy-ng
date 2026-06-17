@@ -6,7 +6,7 @@
 use crate::quic::crypto::{InitialKeyRole, InitialKeys};
 use crate::quic::error::{QuicError, Result};
 use crate::quic::parser::parse_varint;
-use crate::tls::sni::extract_sni;
+use crate::tls::sni::{extract_sni, SniError};
 use ring::aead::{Aad, LessSafeKey, Nonce, UnboundKey, AES_128_GCM};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Mutex, Once};
@@ -79,17 +79,13 @@ pub fn extract_sni_from_quic_initial(packet: &mut [u8]) -> Result<Option<String>
         header.pn_offset
     );
 
-    // ⚠️ 快速失败检查：如果 PN 长度异常，可能不是真正的 Initial packet
-    // 对于客户端 Initial packet，PN 通常是 1-2 字节
+    // Packet Number length is protected by QUIC header protection, so this value is
+    // only useful for low-level debugging before header protection is removed.
     let protected_pn_len = (packet[0] & 0x03) + 1;
-    if protected_pn_len > 2 {
-        warn!(
-            "Protected PN length {} is unusual for client Initial packet (expected 1-2). \
-              This might not be a client Initial packet.",
-            protected_pn_len
-        );
-        // 继续尝试，但记录警告
-    }
+    debug!(
+        "Protected PN length bits before unprotection: {}",
+        protected_pn_len
+    );
     debug!(
         "Initial header parsed: version={:#x}, dcid_len={}",
         header.version,
@@ -172,8 +168,22 @@ pub fn extract_sni_from_quic_initial(packet: &mut [u8]) -> Result<Option<String>
             role
         );
 
-        let sni = extract_sni(&crypto_data)
-            .map_err(|e| QuicError::TlsError(format!("Failed to extract SNI from TLS: {}", e)))?;
+        let sni = match extract_sni(&crypto_data) {
+            Ok(sni) => sni,
+            Err(e) if matches!(e.downcast_ref::<SniError>(), Some(SniError::DataTooShort)) => {
+                debug!(
+                    "TLS ClientHello is incomplete ({} bytes available); waiting for more CRYPTO data",
+                    crypto_data.len()
+                );
+                return Ok(None);
+            }
+            Err(e) => {
+                return Err(QuicError::TlsError(format!(
+                    "Failed to extract SNI from TLS: {}",
+                    e
+                )));
+            }
+        };
 
         if let Some(ref sni) = sni {
             info!("✅ Successfully extracted SNI: {} (role={:?})", sni, role);
