@@ -34,12 +34,6 @@ jobs:
             package_stem: sniproxy-ng-linux-arm64-musl
             binary_name: sniproxy-ng
             use_cross: true
-          - runner: macos-13
-            target: x86_64-apple-darwin
-            asset_name: sniproxy-ng-darwin-amd64
-            package_stem: sniproxy-ng-darwin-amd64
-            binary_name: sniproxy-ng
-            use_cross: false
           - runner: macos-14
             target: aarch64-apple-darwin
             asset_name: sniproxy-ng-darwin-arm64
