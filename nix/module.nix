@@ -4,11 +4,6 @@ let
   cfg = config.services.sniproxy-ng;
   tomlFormat = pkgs.formats.toml { };
   defaultPackage = pkgs.callPackage ./package.nix { };
-
-  configSource =
-    if cfg.configFile != null
-    then cfg.configFile
-    else "${config.environment.etc."sniproxy-ng/config.toml".source}";
 in
 {
   options.services.sniproxy-ng = {
@@ -22,14 +17,8 @@ in
     };
 
     settings = lib.mkOption {
-      type = lib.types.nullOr tomlFormat.type;
-      default = null;
-      description = ''
-        Configuration attribute set written to config.toml.
-        Either this or configFile must be set, not both.
-        WARNING: secrets (e.g. socks5.password) will be stored in the Nix store.
-        Use configFile for secret-managed configurations.
-      '';
+      type = tomlFormat.type;
+      description = "Configuration attribute set written to config.toml.";
       example = {
         server = {
           listen_https_addr = "0.0.0.0:443";
@@ -43,33 +32,10 @@ in
         rules.allow = [ ];
       };
     };
-
-    configFile = lib.mkOption {
-      type = lib.types.nullOr lib.types.str;
-      default = null;
-      description = ''
-        Absolute path to an existing runtime config.toml file.
-        Either this or settings must be set, not both.
-        Prefer this over settings when secrets are involved, because this path is
-        used at runtime and is not copied into the Nix store.
-      '';
-      example = "/run/secrets/sniproxy-ng/config.toml";
-    };
   };
 
   config = lib.mkIf cfg.enable {
-    assertions = [
-      {
-        assertion = cfg.settings != null || cfg.configFile != null;
-        message = "One of services.sniproxy-ng.settings or services.sniproxy-ng.configFile must be set.";
-      }
-      {
-        assertion = !(cfg.settings != null && cfg.configFile != null);
-        message = "Only one of services.sniproxy-ng.settings or services.sniproxy-ng.configFile should be set, not both.";
-      }
-    ];
-
-    environment.etc."sniproxy-ng/config.toml" = lib.mkIf (cfg.settings != null) {
+    environment.etc."sniproxy-ng/config.toml" = {
       source = tomlFormat.generate "config.toml" cfg.settings;
     };
 
@@ -82,7 +48,7 @@ in
         Type = "simple";
         ExecStart = "${cfg.package}/bin/sniproxy-ng";
         WorkingDirectory = "/var/lib/sniproxy-ng";
-        ExecStartPre = "${lib.getBin pkgs.coreutils}/bin/ln -sf ${configSource} /var/lib/sniproxy-ng/config.toml";
+        ExecStartPre = "${lib.getBin pkgs.coreutils}/bin/ln -sf /etc/sniproxy-ng/config.toml /var/lib/sniproxy-ng/config.toml";
 
         DynamicUser = true;
         AmbientCapabilities = "CAP_NET_BIND_SERVICE";
