@@ -107,6 +107,7 @@ mod tests {
                 console_log_level: "warn".to_string(),
                 max_client_connections: 512,
                 transfer_idle_timeout: 300,
+                quic_mode: "off".to_string(),
             },
             socks5: crate::config::Socks5Config {
                 addr: "127.0.0.1:1080".parse().unwrap(),

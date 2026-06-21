@@ -53,6 +53,79 @@ cargo build --release
 sudo ./target/release/sniproxy-ng
 ```
 
+## Nix
+
+项目提供了 flake、开发环境、可构建包、`nix run` app 和 NixOS module。
+
+```bash
+# 进入开发环境
+nix develop
+
+# 构建程序
+nix build
+
+# 运行程序
+# 注意：程序当前会从当前工作目录读取 config.toml
+nix run
+```
+
+如果要直接运行，请先准备当前目录下的 `config.toml`；或先用 `nix build`，再在包含配置文件的目录中执行 `./result/bin/sniproxy-ng`。
+
+## NixOS
+
+flake 暴露了 `nixosModules.default`，可直接在 NixOS 配置中引入。
+
+### 使用 `settings` 生成配置
+
+```nix
+{
+  imports = [
+    inputs.sniproxy-ng.nixosModules.default
+  ];
+
+  services.sniproxy-ng = {
+    enable = true;
+    settings = {
+      server = {
+        listen_https_addr = "0.0.0.0:443";
+        listen_http_addr = "0.0.0.0:80";
+        quic_mode = "off";
+      };
+
+      socks5 = {
+        addr = "127.0.0.1:1080";
+      };
+
+      rules.allow = [ ];
+    };
+  };
+}
+```
+
+### 使用运行时 secret 配置文件
+
+如果配置中包含 `socks5.password` 等敏感字段，建议不要使用 `settings`，而是使用运行时 secret 文件：
+
+```nix
+{
+  imports = [
+    inputs.sniproxy-ng.nixosModules.default
+  ];
+
+  services.sniproxy-ng = {
+    enable = true;
+    configFile = "/run/secrets/sniproxy-ng/config.toml";
+  };
+}
+```
+
+注意：
+
+- `settings` 会把配置写入 Nix store，不适合保存 secrets
+- `configFile` 应是运行时可读的**绝对路径**，不会被复制进 Nix store
+- 服务会以 systemd `DynamicUser` 运行，并自动申请 `CAP_NET_BIND_SERVICE` 以绑定 80/443
+- 程序当前固定读取工作目录中的 `config.toml`，模块已自动处理该约束
+
 ## 测试
 
 **无需 root 权限的测试方法**：
