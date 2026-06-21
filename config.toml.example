@@ -1,6 +1,7 @@
 # sniproxy-ng 配置文件示例
 
 [server]
+quic_mode = "off"
 # HTTPS 监听地址 (TCP 和 UDP 都会监听此地址)
 listen_https_addr = "0.0.0.0:443"
 

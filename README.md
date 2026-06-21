@@ -6,10 +6,10 @@
 
 - **HTTPS (443)** - 从 TLS ClientHello 提取 SNI
 - **HTTP (80)** - 从 Host 请求头提取域名
-- **QUIC/HTTP3（best-effort）** - 仅解密 QUIC Initial Packet 提取 SNI，用于白名单/放行决策，然后做 UDP 透明转发（不终止 QUIC，不解析 HTTP/3）
+- **QUIC/HTTP3（实验性，默认关闭）** - 需在配置中启用
 - **SOCKS5 转发** - TCP CONNECT 和 UDP ASSOCIATE
 - **域名白名单** - 灵活的通配符匹配
-- **连接池** - TCP 和 QUIC 会话复用
+- **连接池** - TCP 连接复用
 
 ## 配置
 
@@ -39,16 +39,9 @@ allow = ["*.google.com", "*youtube.com"]  # 空数组允许所有域名
 
 `max_client_connections` 是入站客户端并发上限，用于保护进程 fd；`max_connections` 是到 SOCKS5 后端的连接上限。生产环境还应配合 systemd `LimitNOFILE` 或 `ulimit -n` 设置足够的 fd 上限。
 
-QUIC/HTTP3 依赖 SOCKS5 UDP relay。默认 `SNIPROXY_QUIC_MODE=auto` 会在启动时探测 SOCKS5 UDP relay，探测成功才启用 UDP/H3；失败则不启动 UDP listener，让客户端自动回退到 HTTPS/TCP。
+QUIC/HTTP3 是实验性模式，默认关闭。配置 `server.quic_mode = "auto|on"` 可启用，环境变量 `SNIPROXY_QUIC_MODE` 可覆盖配置文件。禁用时客户端自动回退到 HTTPS/TCP。
 
-```bash
-SNIPROXY_QUIC_MODE=auto
-SNIPROXY_DNS_SERVER=1.1.1.1:53
-```
-
-QUIC 目标 DNS 默认通过 SOCKS5 UDP relay 查询 `SNIPROXY_DNS_SERVER`，不会使用本机系统 DNS。也可设置 `SNIPROXY_QUIC_MODE=on|off` 强制启用或禁用 QUIC/H3。
-
-详细说明见 [DNS Resolution](docs/DNS_RESOLUTION.md)。
+详细说明见 [QUIC 实现说明](docs/QUIC_IMPLEMENTATION_NOTES.md)、[DNS 解析](docs/DNS_RESOLUTION.md)。
 
 ## 使用
 

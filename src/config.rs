@@ -34,6 +34,8 @@ pub struct ServerConfig {
     /// 转发阶段空闲超时(秒)
     #[serde(default = "default_transfer_idle_timeout")]
     pub transfer_idle_timeout: u64,
+    #[serde(default = "default_quic_mode")]
+    pub quic_mode: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -84,6 +86,10 @@ fn default_max_client_connections() -> usize {
 
 fn default_transfer_idle_timeout() -> u64 {
     300
+}
+
+fn default_quic_mode() -> String {
+    "off".to_string()
 }
 
 fn default_timeout() -> u64 {
@@ -154,6 +160,7 @@ allow = ["*.google.com"]
         assert_eq!(config.server.console_log_level, "error");
         assert_eq!(config.server.max_client_connections, 512);
         assert_eq!(config.server.transfer_idle_timeout, 300);
+        assert_eq!(config.server.quic_mode, "off");
         assert_eq!(config.rules.allow.len(), 1);
     }
 
@@ -177,6 +184,7 @@ addr = "127.0.0.1:1080"
         assert_eq!(config.server.console_log_level, "warn");
         assert_eq!(config.server.max_client_connections, 512);
         assert_eq!(config.server.transfer_idle_timeout, 300);
+        assert_eq!(config.server.quic_mode, "off");
     }
 
     #[test]

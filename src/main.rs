@@ -136,7 +136,8 @@ async fn main() -> Result<()> {
 }
 
 async fn should_start_quic(config: &Config) -> Result<bool> {
-    let mode = std::env::var("SNIPROXY_QUIC_MODE").unwrap_or_else(|_| "auto".to_string());
+    let mode = std::env::var("SNIPROXY_QUIC_MODE")
+        .unwrap_or_else(|_| config.server.quic_mode.clone());
     info!("QUIC/HTTP3 startup mode: {}", mode);
 
     match mode.as_str() {
