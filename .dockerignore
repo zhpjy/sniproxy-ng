@@ -1,0 +1,11 @@
+.git
+.github
+.direnv
+.claude
+target
+logs
+tests/.out
+dist
+README.md
+docs
+*.log

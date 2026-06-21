@@ -97,3 +97,27 @@ HTTPS (443) → SNI 提取   ↗
 ## License
 
 MIT
+
+## Docker
+
+Build the image locally:
+
+```bash
+docker build -t sniproxy-ng .
+```
+
+Run with the bundled default config (`/app/config.toml`):
+
+```bash
+docker run --rm -p 443:443/tcp -p 443:443/udp -p 80:80/tcp sniproxy-ng
+```
+
+Mount a custom config at `/app/config.toml` to override the default:
+
+```bash
+docker run --rm -p 443:443/tcp -p 443:443/udp -p 80:80/tcp \
+  -v "$(pwd)/config.toml:/app/config.toml:ro" \
+  sniproxy-ng
+```
+
+If your custom config listens on non-privileged ports such as `8443` or `8080`, adjust the published ports accordingly.
