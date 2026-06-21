@@ -66,6 +66,7 @@ nix build
 
 # 运行程序（本地仓库）
 # 注意：程序当前会从当前工作目录读取 config.toml
+# 运行前请确保当前目录下有 config.toml
 nix run
 ```
 
@@ -83,13 +84,14 @@ nix build github:zhpjy/sniproxy-ng#sniproxy-ng
 
 # 运行默认 app
 # 注意：程序当前会从当前工作目录读取 config.toml
+# 运行前请先准备当前目录下的 config.toml
 nix run github:zhpjy/sniproxy-ng
 
 # 或显式指定 app 名称
 nix run github:zhpjy/sniproxy-ng#sniproxy-ng
 ```
 
-如果要直接运行，请先准备当前目录下的 `config.toml`；或先用 `nix build github:zhpjy/sniproxy-ng`，再在包含配置文件的目录中执行 `./result/bin/sniproxy-ng`。
+`nix run` 会直接执行编译好的 `sniproxy-ng` 二进制，因为程序硬编码从当前工作目录读取 `config.toml`，所以运行前需要先确认 `config.toml` 存在于当前目录。也可先用 `nix build` 构建，再在包含配置文件的目录中手动执行 `./result/bin/sniproxy-ng`。
 
 ## NixOS
 
