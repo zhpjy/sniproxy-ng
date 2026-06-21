@@ -69,13 +69,17 @@
             description = "Run the sniproxy-ng binary";
           };
         };
+        sniproxy-ng = inputs.self.apps.${pkgs.stdenv.hostPlatform.system}.default;
       });
 
       checks = forEachSupportedSystem ({ pkgs }: {
         default = pkgs.sniproxy-ng;
       });
 
-      nixosModules.default = import ./nix/module.nix;
+      nixosModules = rec {
+        default = import ./nix/module.nix;
+        sniproxy-ng = default;
+      };
 
       devShells = forEachSupportedSystem (
         { pkgs }:

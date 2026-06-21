@@ -55,25 +55,56 @@ sudo ./target/release/sniproxy-ng
 
 ## Nix
 
-项目提供了 flake、开发环境、可构建包、`nix run` app 和 NixOS module。
+项目提供了 flake、开发环境、可构建包、`nix run` app 和 NixOS module，支持直接通过 GitHub flake URL 使用：`github:zhpjy/sniproxy-ng`。
 
 ```bash
-# 进入开发环境
+# 进入开发环境（本地仓库）
 nix develop
 
-# 构建程序
+# 构建程序（本地仓库）
 nix build
 
-# 运行程序
+# 运行程序（本地仓库）
 # 注意：程序当前会从当前工作目录读取 config.toml
 nix run
 ```
 
-如果要直接运行，请先准备当前目录下的 `config.toml`；或先用 `nix build`，再在包含配置文件的目录中执行 `./result/bin/sniproxy-ng`。
+也可以不克隆仓库，直接从 GitHub 使用：
+
+```bash
+# 进入开发环境
+nix develop github:zhpjy/sniproxy-ng
+
+# 构建默认包
+nix build github:zhpjy/sniproxy-ng
+
+# 或显式指定包名
+nix build github:zhpjy/sniproxy-ng#sniproxy-ng
+
+# 运行默认 app
+# 注意：程序当前会从当前工作目录读取 config.toml
+nix run github:zhpjy/sniproxy-ng
+
+# 或显式指定 app 名称
+nix run github:zhpjy/sniproxy-ng#sniproxy-ng
+```
+
+如果要直接运行，请先准备当前目录下的 `config.toml`；或先用 `nix build github:zhpjy/sniproxy-ng`，再在包含配置文件的目录中执行 `./result/bin/sniproxy-ng`。
 
 ## NixOS
 
-flake 暴露了 `nixosModules.default`，可直接在 NixOS 配置中引入。
+flake 暴露了 `nixosModules.default` 和 `nixosModules.sniproxy-ng`，可直接在 NixOS 配置中引入。
+
+### 在 flake inputs 中引入
+
+```nix
+{
+  inputs = {
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    sniproxy-ng.url = "github:zhpjy/sniproxy-ng";
+  };
+}
+```
 
 ### 使用 `settings` 生成配置
 
@@ -81,6 +112,7 @@ flake 暴露了 `nixosModules.default`，可直接在 NixOS 配置中引入。
 {
   imports = [
     inputs.sniproxy-ng.nixosModules.default
+    # 或 inputs.sniproxy-ng.nixosModules.sniproxy-ng
   ];
 
   services.sniproxy-ng = {
@@ -109,7 +141,7 @@ flake 暴露了 `nixosModules.default`，可直接在 NixOS 配置中引入。
 ```nix
 {
   imports = [
-    inputs.sniproxy-ng.nixosModules.default
+    inputs.sniproxy-ng.nixosModules.sniproxy-ng
   ];
 
   services.sniproxy-ng = {
@@ -125,6 +157,13 @@ flake 暴露了 `nixosModules.default`，可直接在 NixOS 配置中引入。
 - `configFile` 应是运行时可读的**绝对路径**，不会被复制进 Nix store
 - 服务会以 systemd `DynamicUser` 运行，并自动申请 `CAP_NET_BIND_SERVICE` 以绑定 80/443
 - 程序当前固定读取工作目录中的 `config.toml`，模块已自动处理该约束
+
+如果你想在自己的 flake 中复用包，也可以直接引用：
+
+```nix
+inputs.sniproxy-ng.packages.${pkgs.system}.default
+# 或 inputs.sniproxy-ng.packages.${pkgs.system}.sniproxy-ng
+```
 
 ## 测试
 
