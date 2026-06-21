@@ -25,5 +25,9 @@ Thumbs.db
 # Git Worktrees
 .worktrees/
 
+# Nix build outputs
+result
+result-*
+
 # Config (不要提交包含敏感信息的配置)
 config.toml
