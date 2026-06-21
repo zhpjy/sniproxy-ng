@@ -5,12 +5,12 @@
 use crate::config::Config;
 use crate::relay::{copy_with_idle_timeout, log_accept_error};
 use crate::router::Router;
-use anyhow::{anyhow, bail, Result};
+use anyhow::{anyhow, Result};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::TcpListener;
 use tokio::sync::Semaphore;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, trace, warn};
 
 pub mod error;
 pub mod parser;
@@ -28,7 +28,7 @@ pub async fn run(config: Config, router: Arc<Router>) -> Result<()> {
     info!("Starting HTTP proxy server on {}", listen_addr);
 
     let listener = TcpListener::bind(&listen_addr).await?;
-    debug!("HTTP proxy server listening on {}", listen_addr);
+    info!("HTTP proxy server listening on {}", listen_addr);
 
     let accept_limit = Arc::new(Semaphore::new(config.server.max_client_connections.max(1)));
 
@@ -41,7 +41,7 @@ pub async fn run(config: Config, router: Arc<Router>) -> Result<()> {
 
         match listener.accept().await {
             Ok((client_stream, client_addr)) => {
-                debug!("Accepted HTTP connection from {}", client_addr);
+                trace!("Accepted HTTP connection from {}", client_addr);
 
                 let router_clone = router.clone();
                 let socks5_addr = config.socks5.addr.to_string();
@@ -64,7 +64,7 @@ pub async fn run(config: Config, router: Arc<Router>) -> Result<()> {
                     )
                     .await
                     {
-                        error!("Error handling HTTP client {}: {}", client_addr, e);
+                        warn!("HTTP client {} failed: {}", client_addr, e);
                     }
                 });
             }
@@ -89,7 +89,7 @@ async fn handle_client(
 ) -> Result<()> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    debug!("Handling HTTP client {}", client_addr);
+    trace!("Handling HTTP client {}", client_addr);
 
     let mut buffer = vec![0u8; 4096];
     let mut client_stream = client_stream;
@@ -104,11 +104,11 @@ async fn handle_client(
         })??;
 
     if n == 0 {
-        warn!("HTTP client {} closed connection immediately", client_addr);
+        debug!("HTTP client {} closed connection immediately", client_addr);
         return Ok(());
     }
 
-    debug!("Peeked {} bytes from {}", n, client_addr);
+    trace!("Peeked {} HTTP bytes from {}", n, client_addr);
 
     let host = match extract_host(&buffer[..n]) {
         Ok(h) => {
@@ -117,7 +117,7 @@ async fn handle_client(
         }
         Err(e) => {
             warn!("Failed to extract Host from {}: {}", client_addr, e);
-            bail!("Host extraction failed: {}", e);
+            return Ok(());
         }
     };
 
@@ -126,13 +126,16 @@ async fn handle_client(
             "Domain '{}' not in whitelist, rejecting HTTP connection from {}",
             host, client_addr
         );
-        bail!("Domain '{}' is not in the whitelist", host);
+        return Ok(());
     }
 
     let target_host = host.clone();
     let target_port = 80;
 
-    debug!("Connecting to {}:{} via SOCKS5", target_host, target_port);
+    debug!(
+        "Connecting HTTP upstream to {}:{} via SOCKS5",
+        target_host, target_port
+    );
 
     use crate::socks5::Socks5Client;
 
@@ -146,14 +149,14 @@ async fn handle_client(
 
     let mut socks5_stream = client.connect(&target_host, target_port).await?;
 
-    debug!(
-        "Established HTTP connection to {}:{} via SOCKS5",
-        target_host, target_port
+    info!(
+        "HTTP route established: client={}, host={}, target={}:{}",
+        client_addr, host, target_host, target_port
     );
 
     client_stream.read_exact(&mut buffer[..n]).await?;
     socks5_stream.write_all(&buffer[..n]).await?;
-    debug!("Wrote {} bytes of initial data to SOCKS5 stream", n);
+    trace!("Wrote {} bytes of initial HTTP data to SOCKS5 stream", n);
 
     let (mut client_read, mut client_write) = client_stream.split();
     let (mut proxy_read, mut proxy_write) = tokio::io::split(socks5_stream);
@@ -174,16 +177,16 @@ async fn handle_client(
     tokio::select! {
         result = client_to_proxy => {
             if let Err(e) = result {
-                debug!("HTTP client to proxy forwarding ended: {}", e);
+                debug!("HTTP client-to-proxy forwarding ended: {}", e);
             }
         }
         result = proxy_to_client => {
             if let Err(e) = result {
-                debug!("HTTP proxy to client forwarding ended: {}", e);
+                debug!("HTTP proxy-to-client forwarding ended: {}", e);
             }
         }
     }
 
-    debug!("HTTP connection from {} closed", client_addr);
+    trace!("HTTP connection from {} closed", client_addr);
     Ok(())
 }

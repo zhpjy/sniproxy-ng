@@ -8,18 +8,15 @@ mod tcp;
 mod tls;
 
 use anyhow::Result;
+use std::path::Path;
 use tracing::{error, info, warn};
+use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
 use config::Config;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // 初始化日志系统
-    init_logging();
-
-    info!("Starting sniproxy-ng...");
-
     // 加载配置
     let config = match Config::load("config.toml") {
         Ok(c) => c,
@@ -29,6 +26,10 @@ async fn main() -> Result<()> {
             std::process::exit(1);
         }
     };
+
+    let _log_guard = init_logging(&config)?;
+
+    info!("Starting sniproxy-ng...");
     info!("Configuration loaded successfully");
 
     info!("SOCKS5 backend: {}", config.socks5.addr);
@@ -136,15 +137,21 @@ async fn main() -> Result<()> {
 
 async fn should_start_quic(config: &Config) -> Result<bool> {
     let mode = std::env::var("SNIPROXY_QUIC_MODE").unwrap_or_else(|_| "auto".to_string());
+    info!("QUIC/HTTP3 startup mode: {}", mode);
 
     match mode.as_str() {
         "off" => Ok(false),
         "on" => {
-            if let Err(e) = quic::session::probe_socks5_udp_relay(&config.socks5).await {
-                warn!(
-                    "SOCKS5 UDP relay probe failed, but SNIPROXY_QUIC_MODE=on; starting QUIC anyway: {}",
-                    e
-                );
+            match quic::session::probe_socks5_udp_relay(&config.socks5).await {
+                Ok(()) => {
+                    info!("SOCKS5 UDP relay probe succeeded; forcing QUIC/HTTP3 on");
+                }
+                Err(e) => {
+                    warn!(
+                        "SOCKS5 UDP relay probe failed, but SNIPROXY_QUIC_MODE=on; starting QUIC anyway: {}",
+                        e
+                    );
+                }
             }
             Ok(true)
         }
@@ -169,13 +176,70 @@ async fn should_start_quic(config: &Config) -> Result<bool> {
 }
 
 /// 初始化日志系统
-fn init_logging() {
-    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+fn init_logging(config: &Config) -> Result<WorkerGuard> {
+    let log_path = Path::new(&config.server.log_file);
+    let log_dir = log_path.parent().filter(|p| !p.as_os_str().is_empty());
+    if let Some(dir) = log_dir {
+        std::fs::create_dir_all(dir)?;
+    }
 
-    let formatting_layer = fmt::layer().with_target(false).with_thread_ids(true);
+    let file_name = log_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("sniproxy-ng.log");
+    let appender =
+        tracing_appender::rolling::never(log_dir.unwrap_or_else(|| Path::new(".")), file_name);
+    let (file_writer, guard) = tracing_appender::non_blocking(appender);
 
-    tracing_subscriber::registry()
-        .with(env_filter)
-        .with(formatting_layer)
-        .init();
+    let rust_log = std::env::var(EnvFilter::DEFAULT_ENV).ok();
+    let file_filter = rust_log
+        .as_deref()
+        .map(EnvFilter::new)
+        .unwrap_or_else(|| EnvFilter::new(config.server.log_level.clone()));
+    let console_filter = rust_log
+        .as_deref()
+        .map(EnvFilter::new)
+        .unwrap_or_else(|| EnvFilter::new(config.server.console_log_level.clone()));
+
+    match config.server.log_format.as_str() {
+        "json" => {
+            let console_layer = fmt::layer()
+                .json()
+                .with_writer(std::io::stderr)
+                .with_target(false)
+                .with_thread_ids(false)
+                .with_filter(console_filter);
+            let file_layer = fmt::layer()
+                .json()
+                .with_writer(file_writer)
+                .with_target(false)
+                .with_thread_ids(true)
+                .with_filter(file_filter);
+
+            tracing_subscriber::registry()
+                .with(console_layer)
+                .with(file_layer)
+                .init();
+        }
+        _ => {
+            let console_layer = fmt::layer()
+                .compact()
+                .with_writer(std::io::stderr)
+                .with_target(false)
+                .with_thread_ids(false)
+                .with_filter(console_filter);
+            let file_layer = fmt::layer()
+                .with_writer(file_writer)
+                .with_target(false)
+                .with_thread_ids(true)
+                .with_filter(file_filter);
+
+            tracing_subscriber::registry()
+                .with(console_layer)
+                .with(file_layer)
+                .init();
+        }
+    }
+
+    Ok(guard)
 }

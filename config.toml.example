@@ -8,10 +8,17 @@ listen_https_addr = "0.0.0.0:443"
 # listen_http_addr = "0.0.0.0:80"
 
 # 日志级别: trace, debug, info, warn, error
+# 默认用于本地日志文件；RUST_LOG 会同时覆盖文件和控制台日志级别。
 log_level = "info"
 
 # 日志格式: json, pretty
 log_format = "pretty"
+
+# 本地日志文件路径，默认写入 ./logs/sniproxy-ng.log
+log_file = "logs/sniproxy-ng.log"
+
+# 控制台日志级别，默认只显示 warn/error，避免前台输出过多连接流水。
+console_log_level = "warn"
 
 # 最大同时处理的客户端连接数
 # 一条 TCP 代理连接通常占用客户端和 SOCKS5 两个 fd，生产环境需结合 LimitNOFILE/ulimit 设置。

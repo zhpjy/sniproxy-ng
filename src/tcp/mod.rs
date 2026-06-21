@@ -3,13 +3,13 @@ use crate::relay::{copy_with_idle_timeout, log_accept_error};
 use crate::router::Router;
 use crate::socks5::{ConnectionPool, PoolConfig, Socks5Client};
 use crate::tls::sni::extract_sni;
-use anyhow::{anyhow, bail, Result};
+use anyhow::{anyhow, Result};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Semaphore;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, trace, warn};
 
 #[derive(Clone)]
 struct Socks5Runtime {
@@ -30,7 +30,7 @@ pub async fn run(config: Config) -> Result<()> {
     info!("Starting TCP proxy server on {}", listen_addr);
 
     let listener = TcpListener::bind(&listen_addr).await?;
-    debug!("TCP proxy server listening on {}", listen_addr);
+    info!("TCP proxy server listening on {}", listen_addr);
 
     // 创建路由器
     let router = Arc::new(Router::new(config.clone()));
@@ -58,7 +58,7 @@ pub async fn run(config: Config) -> Result<()> {
 
         match listener.accept().await {
             Ok((client_stream, client_addr)) => {
-                debug!("Accepted connection from {}", client_addr);
+                trace!("Accepted TCP connection from {}", client_addr);
 
                 // 克隆以供任务使用
                 let router_clone = router.clone();
@@ -78,7 +78,7 @@ pub async fn run(config: Config) -> Result<()> {
                         handle_client(client_stream, client_addr, router_clone, pool_clone, socks5)
                             .await
                     {
-                        error!("Error handling client {}: {}", client_addr, e);
+                        warn!("TCP client {} failed: {}", client_addr, e);
                     }
                 });
             }
@@ -98,7 +98,7 @@ async fn handle_client(
     pool: Arc<ConnectionPool>,
     socks5: Socks5Runtime,
 ) -> Result<()> {
-    debug!("Handling client {}", client_addr);
+    trace!("Handling TCP client {}", client_addr);
 
     // 1. 读取初始数据以提取 SNI
     // 我们需要读取足够的数据来捕获 TLS ClientHello
@@ -114,7 +114,7 @@ async fn handle_client(
         })??;
 
     if n == 0 {
-        warn!("Client {} closed connection immediately", client_addr);
+        debug!("TCP client {} closed connection immediately", client_addr);
         return Ok(());
     }
 
@@ -138,14 +138,11 @@ async fn handle_client(
                     || http_data.starts_with("OPTIONS ")
                     || http_data.starts_with("CONNECT ")
                 {
-                    bail!("HTTP plaintext requests not supported from {}", client_addr);
+                    return Ok(());
                 }
             }
 
-            bail!(
-                "No SNI found and cannot determine target from {}",
-                client_addr
-            );
+            return Ok(());
         }
     };
 
@@ -155,7 +152,7 @@ async fn handle_client(
             "Domain {} not in whitelist, rejecting connection from {}",
             sni, client_addr
         );
-        bail!("Domain '{}' is not in the whitelist", sni);
+        return Ok(());
     }
 
     // 4. 从 SNI 提取目标主机和端口
@@ -165,7 +162,7 @@ async fn handle_client(
 
     // 5. 通过连接池获取 SOCKS5 连接
     debug!(
-        "Getting connection to {}:{} from pool",
+        "Getting TCP upstream connection to {}:{}",
         target_host, target_port
     );
 
@@ -194,9 +191,9 @@ async fn handle_client(
         })
         .await?;
 
-    debug!(
-        "Established connection to {}:{} via SOCKS5",
-        target_host, target_port
+    info!(
+        "TCP route established: client={}, sni={}, target={}:{}",
+        client_addr, sni, target_host, target_port
     );
 
     // 6. 现在我们需要实际读取之前 peek 的数据
@@ -210,7 +207,7 @@ async fn handle_client(
 
     // 先将 peek 的数据写入 SOCKS5 流
     socks5_stream.write_all(&buffer[..n]).await?;
-    debug!("Wrote {} bytes of initial data to SOCKS5 stream", n);
+    trace!("Wrote {} bytes of initial TLS data to SOCKS5 stream", n);
 
     // 7. 双向转发数据
     let (mut client_read, mut client_write) = client_stream.split();
@@ -234,17 +231,17 @@ async fn handle_client(
     tokio::select! {
         result = client_to_proxy => {
             if let Err(e) = result {
-                debug!("Client to proxy forwarding ended: {}", e);
+                debug!("TCP client-to-proxy forwarding ended: {}", e);
             }
         }
         result = proxy_to_client => {
             if let Err(e) = result {
-                debug!("Proxy to client forwarding ended: {}", e);
+                debug!("TCP proxy-to-client forwarding ended: {}", e);
             }
         }
     }
 
-    debug!("Connection from {} closed", client_addr);
+    trace!("TCP connection from {} closed", client_addr);
     Ok(())
 }
 

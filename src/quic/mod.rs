@@ -38,7 +38,7 @@ use crate::router::Router;
 use anyhow::Result as AnyhowResult;
 use std::sync::Arc;
 use tokio::net::UdpSocket;
-use tracing::{debug, info, warn};
+use tracing::{debug, info, trace, warn};
 
 /// 运行 QUIC/HTTP3 代理服务器
 ///
@@ -51,7 +51,6 @@ pub async fn run(config: Config) -> AnyhowResult<()> {
 
     info!("Starting QUIC/HTTP3 proxy server on {}", listen_addr);
     debug!("QUIC SNI extraction module loaded");
-    debug!("Waiting for QUIC Initial packets...");
 
     // 绑定 UDP socket
     let socket = Arc::new(UdpSocket::bind(&listen_addr).await?);
@@ -82,15 +81,15 @@ pub async fn run(config: Config) -> AnyhowResult<()> {
             continue;
         }
 
-        debug!("Received {} bytes from {}", len, src_addr);
+        trace!("Received {} UDP bytes from {}", len, src_addr);
 
         // 处理包 (会话管理器会处理 SNI 提取、白名单检查、relay 创建)
         match session_manager.handle_packet(&buf[..len], src_addr).await {
             Ok(forwarded) => {
                 if forwarded {
-                    debug!("Packet forwarded from {}", src_addr);
+                    trace!("QUIC packet forwarded from {}", src_addr);
                 } else {
-                    debug!("Packet not forwarded (not a valid QUIC Initial or no SNI)");
+                    trace!("QUIC packet not forwarded from {}", src_addr);
                 }
             }
             Err(e) => {

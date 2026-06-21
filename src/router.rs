@@ -103,6 +103,8 @@ mod tests {
                 listen_http_addr: None,
                 log_level: "debug".to_string(),
                 log_format: "pretty".to_string(),
+                log_file: "logs/test.log".to_string(),
+                console_log_level: "warn".to_string(),
                 max_client_connections: 512,
                 transfer_idle_timeout: 300,
             },

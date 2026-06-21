@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 use tokio::sync::Mutex;
-use tracing::{debug, info, warn};
+use tracing::{debug, info, trace, warn};
 
 /// 会话配置
 #[derive(Clone)]
@@ -148,7 +148,7 @@ impl QuicSessionManager {
         let header = match crate::quic::parse_initial_header(packet) {
             Ok(h) => h,
             Err(_) => {
-                debug!("Not a QUIC Initial packet from {}", src);
+                trace!("Not a QUIC Initial packet from {}", src);
                 return Ok(false);
             }
         };
@@ -159,15 +159,10 @@ impl QuicSessionManager {
         let sni = match extract_sni_from_quic_initial(&mut packet_copy)? {
             Some(s) => s,
             None => {
-                debug!("No SNI found in packet from {}", src);
+                debug!("No SNI found in QUIC Initial packet from {}", src);
                 return Ok(false);
             }
         };
-
-        info!(
-            "New QUIC session request: DCID={:?}, SNI={}, client={}",
-            dcid, sni, src
-        );
 
         // 白名单检查
         {
@@ -208,8 +203,8 @@ impl QuicSessionManager {
         };
 
         info!(
-            "Created QUIC session: DCID={:?}, SNI={}, target={}, socks5_relay={}",
-            dcid, sni, target_addr, relay_addr
+            "QUIC route established: client={}, sni={}, target={}, socks5_relay={}, dcid={:?}",
+            src, sni, target_addr, relay_addr, dcid
         );
 
         // 会话任务：负责双向 UDP 转发

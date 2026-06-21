@@ -22,6 +22,12 @@ pub struct ServerConfig {
     /// 日志格式: json, pretty
     #[serde(default = "default_log_format")]
     pub log_format: String,
+    /// 本地日志文件路径
+    #[serde(default = "default_log_file")]
+    pub log_file: String,
+    /// 控制台日志级别，默认只输出告警和错误，避免前台噪声
+    #[serde(default = "default_console_log_level")]
+    pub console_log_level: String,
     /// 最大同时处理的客户端连接数
     #[serde(default = "default_max_client_connections")]
     pub max_client_connections: usize,
@@ -62,6 +68,14 @@ fn default_log_level() -> String {
 
 fn default_log_format() -> String {
     "pretty".to_string()
+}
+
+fn default_log_file() -> String {
+    "logs/sniproxy-ng.log".to_string()
+}
+
+fn default_console_log_level() -> String {
+    "warn".to_string()
 }
 
 fn default_max_client_connections() -> usize {
@@ -117,6 +131,8 @@ listen_https_addr = "0.0.0.0:443"
 listen_http_addr = "0.0.0.0:80"
 log_level = "debug"
 log_format = "json"
+log_file = "logs/test.log"
+console_log_level = "error"
 max_client_connections = 512
 transfer_idle_timeout = 300
 
@@ -134,6 +150,8 @@ allow = ["*.google.com"]
         assert_eq!(config.server.listen_http_addr.unwrap().port(), 80);
         assert_eq!(config.server.log_level, "debug");
         assert_eq!(config.server.log_format, "json");
+        assert_eq!(config.server.log_file, "logs/test.log");
+        assert_eq!(config.server.console_log_level, "error");
         assert_eq!(config.server.max_client_connections, 512);
         assert_eq!(config.server.transfer_idle_timeout, 300);
         assert_eq!(config.rules.allow.len(), 1);
@@ -153,6 +171,10 @@ addr = "127.0.0.1:1080"
         let config: Config = toml::from_str(toml_str).unwrap();
         assert_eq!(config.server.listen_https_addr.unwrap().port(), 443);
         assert!(config.server.listen_http_addr.is_none());
+        assert_eq!(config.server.log_level, "info");
+        assert_eq!(config.server.log_format, "pretty");
+        assert_eq!(config.server.log_file, "logs/sniproxy-ng.log");
+        assert_eq!(config.server.console_log_level, "warn");
         assert_eq!(config.server.max_client_connections, 512);
         assert_eq!(config.server.transfer_idle_timeout, 300);
     }
