@@ -80,10 +80,19 @@
               hash = releaseAsset.hash;
             };
 
-            sourceRoot = "*";
-
             installPhase = ''
-              install -Dm755 ${pname} "$out/bin/${pname}"
+              runHook preInstall
+
+              for candidate in ./${pname} ./*/${pname}; do
+                if [ -f "$candidate" ]; then
+                  install -Dm755 "$candidate" "$out/bin/${pname}"
+                  runHook postInstall
+                  exit 0
+                fi
+              done
+
+              echo "failed to locate ${pname} in extracted release tarball" >&2
+              exit 1
             '';
 
             meta = srcPackage.meta // {
