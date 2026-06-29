@@ -1,17 +1,17 @@
 {
-  "releaseVersion": "0.0.16",
+  "releaseVersion": "0.0.17",
   "assets": {
     "aarch64-darwin": {
-      "file": "sniproxy-ng-darwin-arm64-v0.0.16.tar.gz",
-      "hash": "sha256-vL7IfMYR+kNP8IQ7S1bpI6ls0h/IvhAH2WFqbTA8IBE="
+      "file": "sniproxy-ng-darwin-arm64-v0.0.17.tar.gz",
+      "hash": "sha256-zQOS4y1LJEUIsNElqaBNyPty8bczaSc96DnTy5h2WCs="
     },
     "aarch64-linux": {
-      "file": "sniproxy-ng-linux-arm64-musl-v0.0.16.tar.gz",
-      "hash": "sha256-cw22EG0rSnAsA+75DlttdCSrLVnBOBVYk4XklWSFgyg="
+      "file": "sniproxy-ng-linux-arm64-musl-v0.0.17.tar.gz",
+      "hash": "sha256-qih5wg7a4OriM1rvKe8jICUzYaQCl5ub0ve+G7ljJrA="
     },
     "x86_64-linux": {
-      "file": "sniproxy-ng-linux-amd64-musl-v0.0.16.tar.gz",
-      "hash": "sha256-blRHbv6Shpk3ZwJMqiKLq6zCIo9vIQaGpxvGvXkDXDg="
+      "file": "sniproxy-ng-linux-amd64-musl-v0.0.17.tar.gz",
+      "hash": "sha256-ZRJqfrZGj0D7YKfGAuU1lUHbt5FKxVjvBIYVJSYR3A4="
     }
   }
 }
