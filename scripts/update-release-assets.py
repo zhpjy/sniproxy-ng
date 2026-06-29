@@ -4,14 +4,14 @@ import argparse
 import base64
 import hashlib
 import json
+import re
 from pathlib import Path
 
 
-ASSET_NAMES = {
-    "x86_64-linux": "sniproxy-ng-linux-amd64-musl",
-    "aarch64-linux": "sniproxy-ng-linux-arm64-musl",
-    "x86_64-darwin": "sniproxy-ng-darwin-amd64",
-    "aarch64-darwin": "sniproxy-ng-darwin-arm64",
+ASSET_PATTERNS = {
+    "x86_64-linux": re.compile(r"^sniproxy-ng-linux-amd64-musl-(?P<tag>v.+)\.tar\.gz$"),
+    "aarch64-linux": re.compile(r"^sniproxy-ng-linux-arm64-musl-(?P<tag>v.+)\.tar\.gz$"),
+    "aarch64-darwin": re.compile(r"^sniproxy-ng-darwin-arm64-(?P<tag>v.+)\.tar\.gz$"),
 }
 
 
@@ -20,16 +20,40 @@ def file_sri_sha256(path: Path) -> str:
     return f"sha256-{base64.b64encode(digest).decode('ascii')}"
 
 
+def collect_release_assets(release_tag: str, artifacts_dir: Path) -> dict[str, Path]:
+    assets = {}
+
+    for asset_path in artifacts_dir.iterdir():
+        if not asset_path.is_file():
+            continue
+
+        for system, pattern in ASSET_PATTERNS.items():
+            match = pattern.match(asset_path.name)
+            if not match or match.group("tag") != release_tag:
+                continue
+
+            if system in assets:
+                raise ValueError(f"duplicate artifact for {system}: {asset_path.name}")
+
+            assets[system] = asset_path
+            break
+
+    missing_systems = [system for system in ASSET_PATTERNS if system not in assets]
+    if missing_systems:
+        missing = ", ".join(missing_systems)
+        raise FileNotFoundError(
+            f"missing release artifacts for systems: {missing} in {artifacts_dir}"
+        )
+
+    return dict(sorted(assets.items()))
+
+
 def build_manifest(release_tag: str, artifacts_dir: Path) -> dict:
     version = release_tag.removeprefix("v")
     assets = {}
-    for system, asset_name in ASSET_NAMES.items():
-        file_name = f"{asset_name}-{release_tag}.tar.gz"
-        asset_path = artifacts_dir / file_name
-        if not asset_path.exists():
-            raise FileNotFoundError(f"missing artifact: {asset_path}")
+    for system, asset_path in collect_release_assets(release_tag, artifacts_dir).items():
         assets[system] = {
-            "file": file_name,
+            "file": asset_path.name,
             "hash": file_sri_sha256(asset_path),
         }
     return {
