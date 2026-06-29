@@ -38,13 +38,6 @@ jobs:
             binary_name: sniproxy-ng
             archive_ext: tar.gz
             build_command: cargo zigbuild --release --target aarch64-unknown-linux-musl
-          - os: macos-13
-            target: x86_64-apple-darwin
-            asset_name: sniproxy-ng-darwin-amd64
-            package_stem: sniproxy-ng-darwin-amd64
-            binary_name: sniproxy-ng
-            archive_ext: tar.gz
-            build_command: cargo build --release --target x86_64-apple-darwin
           - os: macos-latest
             target: aarch64-apple-darwin
             asset_name: sniproxy-ng-darwin-arm64
@@ -69,11 +62,15 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      - name: Install zigbuild toolchain
+      - name: Install Zig
+        if: runner.os == 'Linux'
+        uses: mlugg/setup-zig@v1
+        with:
+          version: latest
+
+      - name: Install cargo-zigbuild
         if: runner.os == 'Linux'
         run: |
-          sudo apt-get update
-          sudo apt-get install -y zig
           cargo install cargo-zigbuild --locked
 
       - name: Build binary

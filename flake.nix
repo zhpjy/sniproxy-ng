@@ -19,6 +19,7 @@
       version = cargoToml.package.version;
       releaseVersion = releaseManifest.releaseVersion;
       releaseTag = "v${releaseVersion}";
+      prebuiltSystems = builtins.attrNames releaseManifest.assets;
       supportedSystems = [
         "x86_64-linux"
         "aarch64-linux"
@@ -67,7 +68,7 @@
         { pkgs, system }:
         let
           releaseAssets = releaseManifest.assets;
-          releaseAsset = if builtins.hasAttr system releaseAssets then releaseAssets.${system} else null;
+          releaseAsset = if builtins.elem system prebuiltSystems then releaseAssets.${system} else null;
           srcPackage = pkgs.sniproxy-ng;
           usePrebuilt = releaseAsset != null && releaseAsset.hash != "";
           binaryPackage = pkgs.stdenvNoCC.mkDerivation {
