@@ -1,9 +1,10 @@
+{ self }:
 { config, lib, pkgs, ... }:
 
 let
   cfg = config.services.sniproxy-ng;
   tomlFormat = pkgs.formats.toml { };
-  defaultPackage = pkgs.callPackage ./package.nix { };
+  defaultPackage = self.packages.${pkgs.stdenv.hostPlatform.system}.default;
 in
 {
   options.services.sniproxy-ng = {
@@ -12,7 +13,7 @@ in
     package = lib.mkOption {
       type = lib.types.package;
       default = defaultPackage;
-      defaultText = lib.literalExpression "sniproxy-ng";
+      defaultText = lib.literalExpression "self.packages.${pkgs.stdenv.hostPlatform.system}.default";
       description = "sniproxy-ng package to use.";
     };
 

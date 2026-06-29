@@ -116,7 +116,7 @@
       });
 
       nixosModules = rec {
-        default = import ./nix/module.nix;
+        default = import ./nix/module.nix { inherit self; };
         sniproxy-ng = default;
       };
 
