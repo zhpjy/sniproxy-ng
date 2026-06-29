@@ -13,6 +13,12 @@
     { self, ... }@inputs:
 
     let
+      cargoToml = builtins.fromTOML (builtins.readFile ./Cargo.toml);
+      releaseManifest = builtins.fromJSON (builtins.readFile ./release-assets.json);
+      pname = cargoToml.package.name;
+      version = cargoToml.package.version;
+      releaseVersion = releaseManifest.releaseVersion;
+      releaseTag = "v${releaseVersion}";
       supportedSystems = [
         "x86_64-linux"
         "aarch64-linux"
@@ -30,6 +36,7 @@
                 inputs.self.overlays.default
               ];
             };
+            inherit system;
           }
         );
     in
@@ -56,10 +63,41 @@
         };
       };
 
-      packages = forEachSupportedSystem ({ pkgs }: {
-        default = pkgs.sniproxy-ng;
-        sniproxy-ng = pkgs.sniproxy-ng;
-      });
+      packages = forEachSupportedSystem (
+        { pkgs, system }:
+        let
+          releaseAssets = releaseManifest.assets;
+          releaseAsset = if builtins.hasAttr system releaseAssets then releaseAssets.${system} else null;
+          srcPackage = pkgs.sniproxy-ng;
+          usePrebuilt = releaseAsset != null && releaseAsset.hash != "";
+          binaryPackage = pkgs.stdenvNoCC.mkDerivation {
+            pname = "${pname}-prebuilt";
+            version = releaseVersion;
+
+            src = pkgs.fetchurl {
+              url = "https://github.com/zhpjy/sniproxy-ng/releases/download/${releaseTag}/${releaseAsset.file}";
+              hash = releaseAsset.hash;
+            };
+
+            sourceRoot = "*";
+
+            installPhase = ''
+              install -Dm755 ${pname} "$out/bin/${pname}"
+            '';
+
+            meta = srcPackage.meta // {
+              mainProgram = pname;
+              platforms = [ system ];
+            };
+          };
+          package = if usePrebuilt then binaryPackage else srcPackage;
+        in
+        {
+          default = package;
+          sniproxy-ng = package;
+          sniproxy-ng-src = srcPackage;
+        }
+      );
 
       apps = forEachSupportedSystem ({ pkgs }: {
         default = {
@@ -103,4 +141,4 @@
         }
       );
     };
-  }
+}

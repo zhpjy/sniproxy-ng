@@ -16,36 +16,49 @@ permissions:
 
 jobs:
   build:
-    name: Build ${{ matrix.asset_name }}
-    runs-on: ${{ matrix.runner }}
+    name: Build on ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    env:
+      RELEASE_TAG: ${{ inputs.release_tag != '' && inputs.release_tag || github.ref_name }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - runner: ubuntu-latest
+          - os: ubuntu-latest
             target: x86_64-unknown-linux-musl
             asset_name: sniproxy-ng-linux-amd64-musl
             package_stem: sniproxy-ng-linux-amd64-musl
             binary_name: sniproxy-ng
-            use_cross: true
-          - runner: ubuntu-latest
+            archive_ext: tar.gz
+            build_command: cargo zigbuild --release --target x86_64-unknown-linux-musl
+          - os: ubuntu-latest
             target: aarch64-unknown-linux-musl
             asset_name: sniproxy-ng-linux-arm64-musl
             package_stem: sniproxy-ng-linux-arm64-musl
             binary_name: sniproxy-ng
-            use_cross: true
-          - runner: macos-14
+            archive_ext: tar.gz
+            build_command: cargo zigbuild --release --target aarch64-unknown-linux-musl
+          - os: macos-13
+            target: x86_64-apple-darwin
+            asset_name: sniproxy-ng-darwin-amd64
+            package_stem: sniproxy-ng-darwin-amd64
+            binary_name: sniproxy-ng
+            archive_ext: tar.gz
+            build_command: cargo build --release --target x86_64-apple-darwin
+          - os: macos-latest
             target: aarch64-apple-darwin
             asset_name: sniproxy-ng-darwin-arm64
             package_stem: sniproxy-ng-darwin-arm64
             binary_name: sniproxy-ng
-            use_cross: false
-          - runner: windows-latest
+            archive_ext: tar.gz
+            build_command: cargo build --release --target aarch64-apple-darwin
+          - os: windows-latest
             target: x86_64-pc-windows-msvc
             asset_name: sniproxy-ng-windows-amd64
             package_stem: sniproxy-ng-windows-amd64
             binary_name: sniproxy-ng.exe
-            use_cross: false
+            archive_ext: zip
+            build_command: cargo build --release --target x86_64-pc-windows-msvc
 
     steps:
       - name: Checkout code
@@ -56,26 +69,15 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      - name: Install cross
-        if: matrix.use_cross
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cross
-
-      - name: Build binary (Unix)
-        if: runner.os != 'Windows'
-        shell: bash
+      - name: Install zigbuild toolchain
+        if: runner.os == 'Linux'
         run: |
-          if [ "${{ matrix.use_cross }}" = "true" ]; then
-            cross build --release --target ${{ matrix.target }}
-          else
-            cargo build --release --target ${{ matrix.target }}
-          fi
+          sudo apt-get update
+          sudo apt-get install -y zig
+          cargo install cargo-zigbuild --locked
 
-      - name: Build binary (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: cargo build --release --target ${{ matrix.target }}
+      - name: Build binary
+        run: ${{ matrix.build_command }}
 
       - name: Resolve package version
         id: package_meta
@@ -88,12 +90,8 @@ jobs:
           else
             version="sha-${GITHUB_SHA::7}"
           fi
+          archive_name="${{ matrix.package_stem }}-${version}.${{ matrix.archive_ext }}"
           package_dir="${{ matrix.package_stem }}-${version}"
-          if [ "${{ runner.os }}" = "Windows" ]; then
-            archive_name="${package_dir}.zip"
-          else
-            archive_name="${package_dir}.tar.gz"
-          fi
           echo "version=${version}" >> "$GITHUB_OUTPUT"
           echo "package_dir=${package_dir}" >> "$GITHUB_OUTPUT"
           echo "archive_name=${archive_name}" >> "$GITHUB_OUTPUT"
@@ -104,7 +102,7 @@ jobs:
         run: |
           mkdir -p dist
           mkdir "${{ steps.package_meta.outputs.package_dir }}"
-          cp target/${{ matrix.target }}/release/${{ matrix.binary_name }} "${{ steps.package_meta.outputs.package_dir }}/sniproxy-ng"
+          cp "target/${{ matrix.target }}/release/${{ matrix.binary_name }}" "${{ steps.package_meta.outputs.package_dir }}/sniproxy-ng"
           cp config.toml.example "${{ steps.package_meta.outputs.package_dir }}/config.toml.example"
           tar -czf "dist/${{ steps.package_meta.outputs.archive_name }}" "${{ steps.package_meta.outputs.package_dir }}"
 
@@ -162,3 +160,53 @@ jobs:
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  update-release-manifest:
+    name: Update release-assets.json
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag != '')
+    permissions:
+      contents: write
+
+    steps:
+      - name: Resolve release tag
+        id: resolve_tag
+        run: |
+          if [ -n "${{ github.event.inputs.release_tag }}" ]; then
+            echo "tag=${{ github.event.inputs.release_tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Checkout default branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Update release manifest
+        run: |
+          python3 scripts/update-release-assets.py \
+            --release-tag "${{ steps.resolve_tag.outputs.tag }}" \
+            --artifacts-dir artifacts \
+            --manifest release-assets.json
+
+      - name: Commit updated manifest
+        shell: bash
+        run: |
+          if git diff --quiet -- release-assets.json; then
+            echo "release-assets.json is already up to date"
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add release-assets.json
+          git commit -m "chore: update release-assets.json for ${{ steps.resolve_tag.outputs.tag }}"
+          git push origin HEAD:${{ github.event.repository.default_branch }}
